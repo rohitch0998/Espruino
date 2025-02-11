@@ -1,0 +1,5 @@
+paths-ignore:
+  - "node_modules/**"
+  - "vendor/**"
+  - "third_party/**"
+  - "build/**"
