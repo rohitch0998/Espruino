@@ -1,0 +1,14 @@
+name: "Custom CodeQL Configuration"
+paths:
+  - src/  # Only analyze code in the src directory
+paths-ignore:
+  - test/  # Ignore test files
+  - node_modules/
+  - third_party/
+  - vendor/
+  - docs/
+  - external_libs/
+  - dist/
+  - build/
+queries:
+  - uses: security-and-quality  # Use recommended security and quality queries
