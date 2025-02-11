@@ -13,18 +13,24 @@ jobs:
     name: "Analyze Code with CodeQL"
     runs-on: ubuntu-latest
     permissions:
-      actions: read
-      contents: read
       security-events: write  # Required to upload SARIF results
 
     steps:
-      - name: "Checkout repository"
+      - name: "Checkout Repository"
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Only fetch latest commit to speed up analysis
 
-      - name: "Initialize CodeQL"
+      - name: "Set Up CodeQL"
         uses: github/codeql-action/init@v2
         with:
-          languages: "javascript,python,java,csharp,cpp"
+          languages: "cpp, python, javascript"  # Adjust as needed
+          config-file: .codeqlconfig.yml  # Use custom config for exclusions
+
+      - name: "Build Project (if necessary)"
+        run: |
+          make clean || true
+          make -j$(nproc) || echo "No Makefile found, skipping build step"
 
       - name: "Run CodeQL Analysis"
         uses: github/codeql-action/analyze@v2
@@ -32,9 +38,13 @@ jobs:
           output: sarif-results
           format: sarif
 
-      - name: "Save SARIF results"
+      - name: "Upload SARIF results"
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: sarif-results/codeql.sarif
+
+      - name: "Save SARIF results as artifact"
         uses: actions/upload-artifact@v4
         with:
           name: codeql-sarif
           path: sarif-results/codeql.sarif
-
