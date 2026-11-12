@@ -19,12 +19,9 @@ info = {
  'name' : "Jolt.js",
  'link' :  [ "https://www.espruino.com/Jolt.js" ],
  'espruino_page_link' : 'Jolt.js',
-# 'default_console' : "EV_SERIAL1",
-# 'default_console_tx' : "D6",
-# 'default_console_rx' : "D8",
-# 'default_console_baudrate' : "9600",
+ 'default_console' : "EV_BLUETOOTH",
  'variables' : 12000, # How many variables are allocated for Espruino to use. RAM will be overflowed if this number is too high and code won't compile.
- 'io_buffer_size' : 512, # How big is the input buffer (in 4 byte words). Default on nRF52 is 256 
+ 'io_buffer_size' : 2048, # How big is the input buffer (in bytes). Default on nRF52 is 1024
  'bootloader' : 1,
  'binary_name' : 'espruino_%v_joltjs.hex',
  'build' : {
@@ -44,10 +41,11 @@ info = {
      'DEFINES += -DNEOPIXEL_SCK_PIN=1 -DNEOPIXEL_LRCK_PIN=26', # nRF52840 needs LRCK pin defined for neopixel
      'DEFINES += -DESPR_USE_STEPPER_TIMER=1', # Build in the code for stepping using the timer
      'DEFINES += -DNRF_SDH_BLE_GATT_MAX_MTU_SIZE=131', # 23+x*27 rule as per https://devzone.nordicsemi.com/f/nordic-q-a/44825/ios-mtu-size-why-only-185-bytes
+     'DEFINES += -DNRF_SDH_BLE_GAP_EVENT_LENGTH=6', # Needed to allow coded phy connections
      'DEFINES += -DCENTRAL_LINK_COUNT=2 -DNRF_SDH_BLE_CENTRAL_LINK_COUNT=2', # allow two outgoing connections at once
-     'LDFLAGS += -Xlinker --defsym=LD_APP_RAM_BASE=0x3660', # set RAM base to match MTU=131 + CENTRAL_LINK_COUNT=2
+     'LDFLAGS += -Xlinker --defsym=LD_APP_RAM_BASE=0x3b70', # set RAM base to match MTU=131 + CENTRAL_LINK_COUNT=2 + GAP_EVENT_LENGTH=6
      'DEFINES += -DAPP_TIMER_OP_QUEUE_SIZE=6',
-     'DEFINES+= -DBLUETOOTH_NAME_PREFIX=\'"Jolt.js"\'',
+     'DEFINES+= -DBLUETOOTH_NAME_PREFIX="Jolt.js"',
 #    see targets/nrf5x/app_config.h for USB descriptors
      'DFU_SETTINGS=--application-version 0xff --hw-version 52 --sd-req 0xa9,0xae,0xb6',
      'DFU_PRIVATE_KEY=targets/nrf5x_dfu/dfu_private_key.pem',
@@ -76,10 +74,10 @@ chip = {
   'adc' : 1,
   'dac' : 0,
   'saved_code' : {
-    'address' : ((246 - 100) * 4096), # Bootloader takes pages 248-255, FS takes 246-247
+    'address' : ((245 - 100) * 4096), # Bootloader takes pages 248-255, FS takes 245-247
     'page_size' : 4096,
     'pages' : 100,
-    'flash_available' : 1024 - ((31 + 8 + 2 + 100)*4) # Softdevice uses 31 pages of flash, bootloader 8, FS 2, code 100. Each page is 4 kb.
+    'flash_available' : 1024 - ((31 + 8 + 3 + 100)*4) # Softdevice uses 31 pages of flash, bootloader 8, FS 2, code 100. Each page is 4 kb.
   },
 };
 
@@ -133,7 +131,7 @@ devices = {
     'pin_d2' : 'D25',
     'pin_d3' : 'D34',
     'pin_d0_analog' : 'D30',
-    'pin_d2_analog' : 'D28'       
+    'pin_d2_analog' : 'D28'
   }
 };
 
@@ -162,18 +160,18 @@ board = {
     'Q1.fet' : "INVERTED. Connected to 500mA FET. When 1, GND on Q1 is pulled low. When 0, GND on Q1 is open circuit",
   },
   '_pinfunctions' : {
-    'Q0.scl' : ["ADC1_IN5","3.3"], 
+    'Q0.scl' : ["ADC1_IN5","3.3"],
     'Q0.sda' : ["ADC1_IN1","3.3"],
     'Q1.scl' : ["ADC1_IN7","3.3"],
     'Q1.sda' : ["ADC1_IN0","3.3"],
-    'Q2.scl' : ["3.3"], 
+    'Q2.scl' : ["3.3"],
     'Q2.sda' : ["3.3"],
     'Q2.vcc' : ["3.3"],
     'Q2.gnd' : ["3.3"],
-    'Q3.scl' : ["3.3"], 
+    'Q3.scl' : ["3.3"],
     'Q3.sda' : ["3.3"],
     'Q3.vcc' : ["3.3"],
-    'Q3.gnd' : ["3.3"],    
+    'Q3.gnd' : ["3.3"],
     'VCC' : ["3.3"]
   }
 };

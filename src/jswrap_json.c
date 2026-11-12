@@ -21,8 +21,8 @@
 
 const unsigned int JSON_LIMIT_AMOUNT = 15; // how big does an array get before we start to limit what we show
 const unsigned int JSON_LIMITED_AMOUNT = 5; // When limited, how many items do we show at the beginning and end
-const unsigned int JSON_LIMIT_STRING_AMOUNT = 40; // how big are strings before we limit them?
-const unsigned int JSON_LIMITED_STRING_AMOUNT = 17; // When limited, how many chars do we show at the beginning and end
+const unsigned int JSON_LIMIT_STRING_AMOUNT = 60; // how big are strings before we limit them?
+const unsigned int JSON_LIMITED_STRING_AMOUNT = 27; // When limited, how many chars do we show at the beginning and end
 const unsigned int JSON_ITEMS_ON_LINE_OBJECT = 4; // How many items are allowed end to end on a line.
 const char *JSON_LIMIT_TEXT = " ... ";
 
@@ -96,9 +96,9 @@ JsVar *jswrap_json_parse_internal(JSONFlags flags) {
     return r;
   }
   case LEX_INT: {
-    long long v = stringToInt(jslGetTokenValueAsString());
+    JsVar *v = jslGetTokenValueAsVar();
     jslGetNextToken();
-    return jsvNewFromLongInteger(v);
+    return v;
   }
   case LEX_FLOAT: {
     JsVarFloat v = stringToFloat(jslGetTokenValueAsString());

@@ -24,6 +24,8 @@
 #include "vc31_binary/algo.h"
 
 HrmInfo hrmInfo;
+HrmSample hrmSamples[HRMSAMPLE_MAX];
+uint8_t hrmSampleCount;
 
 /// Initialise heart rate monitoring
 void hrm_init() {
@@ -62,16 +64,19 @@ bool hrm_new(int ppgValue, Vector3 *acc) {
   hrmInfo.raw = ppgValue;
   // Feed data into algorithm
   AlgoInputData_t inputData;
-  inputData.axes.x = acc->y >> 5;  // perpendicular to the direction of the arm
-  inputData.axes.y = acc->x >> 5;  // along the direction of the arm
-  inputData.axes.z = acc->z >> 5;
+  // Acceleration data should have 1G=256 (acc is 1G=8192, so shift by 5 bits)
+  inputData.axes.x = -acc->y >> 5;  // perpendicular to the direction of the arm (if left-hand, in direction of thumb)
+  inputData.axes.y = -acc->x >> 5;  // along the direction of the arm (if left-hand, in direction of middle finger)
+  inputData.axes.z = acc->z >> 5;   // if left-hand, running into palm
   inputData.ppgSample = vcInfo.ppgValue | (vcInfo.wasAdjusted ? 0x1000 : 0);
   inputData.envSample = vcInfo.envValue;
   hrmInfo.msSinceLastHRM += timeDiff;
-  Algo_Input(&inputData, timeDiff, hrmInfo.sportMode, 0/*surfaceRecogMode*/,0/*opticalAidMode*/);
+  // TODO: The VC31 example code uses a static value here (eg hrmPollInterval) - maybe we should do this
+  Algo_Input(&inputData, vcInfo.useStaticSampleTime ?  hrmPollInterval : timeDiff, hrmInfo.sportMode, 0/*surfaceRecogMode*/,0/*opticalAidMode*/);
   AlgoOutputData_t outputData;
   Algo_Output(&outputData);
   //jsiConsolePrintf("HRM %d %d %d\n", outputData.hrData, outputData.reliability, hrmInfo.msSinceLastHRM);
+  bool hadBeat = false;
   if (outputData.hrData!=hrmInfo.lastHRM ||
       outputData.reliability!=hrmInfo.lastConfidence ||
       ((hrmInfo.msSinceLastHRM > 2000) && outputData.hrData && outputData.reliability)) {
@@ -81,9 +86,17 @@ bool hrm_new(int ppgValue, Vector3 *acc) {
     hrmInfo.bpm10 = 10 * outputData.hrData;
     hrmInfo.confidence = outputData.reliability;
     hrmInfo.msSinceLastHRM = 0;
-    return true;
+    hadBeat = true;
   }
-  return false;
+  if (hrmSampleCount < HRMSAMPLE_MAX) {
+    HrmSample *sample = &hrmSamples[hrmSampleCount++];
+    sample->bpm10 = hrmInfo.bpm10; // 10x BPM
+    sample->confidence = hrmInfo.confidence; // 0..100%
+    sample->raw = hrmInfo.raw;
+    sample->avg = hrmInfo.avg; // average signal value, moving average
+    sample->filtered = hrmInfo.filtered;
+  }
+  return hadBeat;
 }
 
 // Append extra information to an existing HRM event object

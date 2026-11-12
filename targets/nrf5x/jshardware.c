@@ -177,6 +177,7 @@ static char m_tx_buffer[NRF_DRV_USBD_EPSIZE];
 static bool m_usb_connected = false;
 static bool m_usb_open = false;
 static bool m_usb_transmitting = false;
+static bool m_usb_wait_rx = false; // are we waiting until we have space before reading from USB?
 
 void on_usb_disconnected() {
   m_usb_open = false;
@@ -187,15 +188,30 @@ void on_usb_disconnected() {
   jshTransmitClearDevice(EV_USBSERIAL); // clear the transmit queue
 }
 
+static void cdc_acm_rx() {
+  ret_code_t ret;
+  m_usb_wait_rx = false;
+  do {
+    // Get amount of data transfered
+    size_t size = app_usbd_cdc_acm_rx_size(&m_app_cdc_acm);
+    if (size > 0) {
+      jshPushIOCharEvents(EV_USBSERIAL,  m_rx_buffer, size);
+      jshHadEvent();
+    }
+
+    // Setup next transfer
+    ret = app_usbd_cdc_acm_read(&m_app_cdc_acm,
+                                  m_rx_buffer,
+                                  sizeof(m_rx_buffer));
+  } while (ret == NRF_SUCCESS);
+}
+
 /**
  * @brief User event handler @ref app_usbd_cdc_acm_user_ev_handler_t (headphones)
  * */
 static void cdc_acm_user_ev_handler(app_usbd_class_inst_t const * p_inst,
                                     app_usbd_cdc_acm_user_event_t event) {
   //jsiConsolePrintf("U %d\n",event);
-
-  app_usbd_cdc_acm_t const * p_cdc_acm = app_usbd_cdc_acm_class_get(p_inst);
-  jshHadEvent();
 
   switch (event)
   {
@@ -216,32 +232,27 @@ static void cdc_acm_user_ev_handler(app_usbd_class_inst_t const * p_inst,
           if (!jsiIsConsoleDeviceForced())
             jsiSetConsoleDevice(EV_USBSERIAL, false);
         }
+        jshHadEvent();
         break;
     }
     case APP_USBD_CDC_ACM_USER_EVT_PORT_CLOSE: {
         //jsiConsolePrintf("APP_USBD_CDC_ACM_USER_EVT_PORT_CLOSE\n");
         on_usb_disconnected();
+        jshHadEvent();
         break;
     }
     case APP_USBD_CDC_ACM_USER_EVT_TX_DONE: {
         // TX finished - queue extra transmit here
         m_usb_transmitting = false;
         jshUSARTKick(EV_USBSERIAL);
+        jshHadEvent();
         break;
     }
     case APP_USBD_CDC_ACM_USER_EVT_RX_DONE: {
-        ret_code_t ret;
-        do {
-          /*Get amount of data transfered*/
-          size_t size = app_usbd_cdc_acm_rx_size(p_cdc_acm);
-          jshPushIOCharEvents(EV_USBSERIAL,  m_rx_buffer, size);
-          jshHadEvent();
-
-          /*Setup next transfer*/
-          ret = app_usbd_cdc_acm_read(&m_app_cdc_acm,
-                                                m_rx_buffer,
-                                                sizeof(m_rx_buffer));
-        } while (ret == NRF_SUCCESS);
+        if (!m_usb_wait_rx && jshGetEventsUsed() < IOBUFFER_XOFF)
+          cdc_acm_rx();
+        else
+          m_usb_wait_rx = true;
         break;
     }
     default:
@@ -387,11 +398,15 @@ void spi0EvtHandler(nrf_drv_spi_evt_t const * p_event
 }
 #endif
 #if TWI_ENABLED
+static const nrf_drv_twi_t TWI0 = NRF_DRV_TWI_INSTANCE(0);
+bool twi0Initialised = false;
+#if ESPR_I2C_COUNT > 1
 static const nrf_drv_twi_t TWI1 = NRF_DRV_TWI_INSTANCE(1);
 bool twi1Initialised = false;
 #endif
+#endif
 #ifdef I2C_SLAVE
-static const nrf_drv_twis_t TWIS1 = NRF_DRV_TWIS_INSTANCE(1);
+static const nrf_drv_twis_t TWIS0 = NRF_DRV_TWIS_INSTANCE(0);
 static uint8_t twisRxBuf[32]; // receive buffer for I2C slave data
 static uint8_t twisAddr;
 #endif
@@ -614,19 +629,21 @@ void spiFlashSleep() {
 
 #if TWI_ENABLED
 const nrf_drv_twi_t *jshGetTWI(IOEventFlags device) {
-  if (device == EV_I2C1) return &TWI1;
+  if (device == EV_I2C1) return &TWI0;
+#if ESPR_I2C_COUNT > 1
+  if (device == EV_I2C2) return &TWI1;
+#endif
   return 0;
 }
 #endif
 #ifdef I2C_SLAVE
 const nrf_drv_twis_t *jshGetTWIS(IOEventFlags device) {
-  if (device == EV_I2C1) return &TWIS1;
+  if (device == EV_I2C1) return &TWIS0;
   return 0;
 }
 #endif
 
 void TIMER1_IRQHandler(void) {
-  nrf_timer_task_trigger(NRF_TIMER1, NRF_TIMER_TASK_CLEAR);
   nrf_timer_event_clear(NRF_TIMER1, NRF_TIMER_EVENT_COMPARE0);
   jstUtilTimerInterruptHandler();
 }
@@ -721,9 +738,14 @@ static NO_INLINE void jshPinSetFunction_int(JshPinFunction func, uint32_t pin) {
                  break;
 #endif
 #if TWI_ENABLED
-  case JSH_I2C1: if (fInfo==JSH_I2C_SDA) NRF_TWI1->PSELSDA = pin;
+  case JSH_I2C1: if (fInfo==JSH_I2C_SDA) NRF_TWI0->PSELSDA = pin;
+                 else NRF_TWI0->PSELSCL = pin;
+                 break;
+#if ESPR_I2C_COUNT>1
+  case JSH_I2C2: if (fInfo==JSH_I2C_SDA) NRF_TWI1->PSELSDA = pin;
                  else NRF_TWI1->PSELSCL = pin;
                  break;
+#endif
 #endif
   default: assert(0);
   }
@@ -1031,9 +1053,9 @@ void jshKill() {
   spiFlashSleep(); // power down SPI flash to save a few uA
 #endif
 #ifdef I2C_SLAVE
-  if (nrf_drv_twis_is_enabled(TWIS1_INSTANCE_INDEX)) {
-    nrf_drv_twis_disable(&TWIS1);
-    nrf_drv_twis_uninit(&TWIS1);
+  if (nrf_drv_twis_is_enabled(TWIS0_INSTANCE_INDEX)) {
+    nrf_drv_twis_disable(&TWIS0);
+    nrf_drv_twis_uninit(&TWIS0);
   }
 #endif
 }
@@ -1042,6 +1064,9 @@ void jshKill() {
 void jshIdle() {
 #if defined(NRF_USB)
   while (app_usbd_event_queue_process()); /* Nothing to do */
+  // if we were delaying reception until our buffer was empty, try now
+  if (m_usb_wait_rx && (jshGetEventsUsed() < IOBUFFER_XON))
+    cdc_acm_rx();
 #endif
 }
 
@@ -1097,7 +1122,7 @@ void jshSetSystemTime(JsSysTime time) {
 
 /// Convert a time in Milliseconds to one in ticks.
 JsSysTime jshGetTimeFromMilliseconds(JsVarFloat ms) {
-  return (JsSysTime) (ms * (SYSCLK_FREQ / 1000.0));
+  return (JsSysTime)((ms * (SYSCLK_FREQ / 1000.0)) + 0.5);
 }
 
 /// Convert ticks to a time in Milliseconds.
@@ -1712,7 +1737,7 @@ IOEventFlags jshPinWatch(Pin pin, bool shouldWatch, JshPinWatchFlags flags) {
         nrf_drv_gpiote_in_event_disable(p);
         uint32_t pin_number = p;
 #if NRF_SD_BLE_API_VERSION>5
-        NRF_GPIO_Type * reg = nrf_gpio_pin_port_decode(&pin_number);
+        NRF_GPIO_Type *reg = nrf_gpio_pin_port_decode(&pin_number);
 #else
         NRF_GPIO_Type *reg = NRF_GPIO;
 #endif
@@ -1746,13 +1771,32 @@ void jshKickWatchDog() {
   NRF_WDT->RR[0] = 0x6E524635;
 }
 
+bool jshGetPinAddress(Pin pin, JshGetPinAddressResult *result) {
+  if (!jshIsPinValid(pin)) return false;
+  if ((pinInfo[pin].port & JSH_PORT_MASK)==JSH_PORTV)
+    return false;
+  uint32_t ipin = (uint32_t)pinInfo[pin].pin;
+#if NRF_SD_BLE_API_VERSION>5
+  NRF_GPIO_Type *port = nrf_gpio_pin_port_decode(&ipin);
+#else
+  NRF_GPIO_Type *port = NRF_GPIO;
+#endif
+  bool negated = pinInfo[pin].port & JSH_PIN_NEGATED;
+  result->mask = 1 << pinInfo[pin].pin;
+  result->in_addr = &port->IN;
+  result->set_addr = negated ? &port->OUTCLR : &port->OUTSET;
+  result->clr_addr = negated ? &port->OUTSET : &port->OUTCLR;
+  return true;
+}
+
+
 /** Check the pin associated with this EXTI - return true if it is a 1 */
 bool jshGetWatchedPinState(IOEventFlags device) {
   return lastHandledPinState;
 }
 
-bool jshIsEventForPin(IOEvent *event, Pin pin) {
-  return IOEVENTFLAGS_GETTYPE(event->flags) == jshGetEventFlagsForWatchedPin((uint32_t)pinInfo[pin].pin);
+bool jshIsEventForPin(IOEventFlags eventFlags, Pin pin) {
+  return IOEVENTFLAGS_GETTYPE(eventFlags) == jshGetEventFlagsForWatchedPin((uint32_t)pinInfo[pin].pin);
 }
 
 /** Is the given device initialised? */
@@ -1761,7 +1805,10 @@ bool jshIsDeviceInitialised(IOEventFlags device) {
   if (device==EV_SPI1) return spi0Initialised;
 #endif
 #if TWI_ENABLED
-  if (device==EV_I2C1) return twi1Initialised;
+  if (device==EV_I2C1) return twi0Initialised;
+#if ESPR_I2C_COUNT>1
+  if (device==EV_I2C2) return twi1Initialised;
+#endif
 #endif
 #if ESPR_USART_COUNT>0
   if (DEVICE_IS_USART(device)) return uart[device-EV_SERIAL1].isInitialised;
@@ -2194,9 +2241,9 @@ static void twis_event_handler(nrf_drv_twis_evt_t const * const p_event)
             size_t bufLen;
             char *bufPtr = jsvGetDataPointer(buf, &bufLen);
             if (bufPtr && bufLen>twisAddr)
-              nrf_drv_twis_tx_prepare(&TWIS1, bufPtr + twisAddr, bufLen - twisAddr);
+              nrf_drv_twis_tx_prepare(&TWIS0, bufPtr + twisAddr, bufLen - twisAddr);
             else
-              nrf_drv_twis_tx_prepare(&TWIS1, twisRxBuf, 0);
+              nrf_drv_twis_tx_prepare(&TWIS0, twisRxBuf, 0);
             jsvUnLock2(i2c,buf);
           }
         }
@@ -2207,7 +2254,7 @@ static void twis_event_handler(nrf_drv_twis_evt_t const * const p_event)
         break;
     case TWIS_EVT_WRITE_REQ:
         if (p_event->data.buf_req)
-          nrf_drv_twis_rx_prepare(&TWIS1, twisRxBuf, sizeof(twisRxBuf));
+          nrf_drv_twis_rx_prepare(&TWIS0, twisRxBuf, sizeof(twisRxBuf));
         break;
     case TWIS_EVT_WRITE_DONE:
         if (p_event->data.rx_amount>0) {
@@ -2241,7 +2288,7 @@ static void twis_event_handler(nrf_drv_twis_evt_t const * const p_event)
 }
 #endif
 
-#if TWI_ENABLED || defined(I2C_SLAVE)
+#if TWI_ENABLED
 /** Set up I2C, if pins are -1 they will be guessed */
 void jshI2CSetup(IOEventFlags device, JshI2CInfo *inf) {
   if (!jshIsPinValid(inf->pinSCL) || !jshIsPinValid(inf->pinSDA)) {
@@ -2249,10 +2296,24 @@ void jshI2CSetup(IOEventFlags device, JshI2CInfo *inf) {
     return;
   }
   uint32_t err_code;
+  bool *twiInitialised = &twi0Initialised;
+  JshPinFunction pinFuncDevice = JSH_I2C1;
+#if ESPR_I2C_COUNT > 1
+  switch (device) {
+    case EV_I2C1:
+      twiInitialised = &twi0Initialised;
+      pinFuncDevice = JSH_I2C1;
+      break;
+    case EV_I2C2:
+      twiInitialised = &twi1Initialised;
+      pinFuncDevice = JSH_I2C2;
+      break;
+  }
+#endif
 #ifdef I2C_SLAVE
-  if ((device == EV_I2C1) && nrf_drv_twis_is_enabled(TWIS1_INSTANCE_INDEX)) {
-    nrf_drv_twis_disable(&TWIS1);
-    nrf_drv_twis_uninit(&TWIS1);
+  if ((device == EV_I2C1) && nrf_drv_twis_is_enabled(TWIS0_INSTANCE_INDEX)) {
+    nrf_drv_twis_disable(&TWIS0);
+    nrf_drv_twis_uninit(&TWIS0);
   }
   if (inf->slaveAddr >=0) {
     const nrf_drv_twis_t *twis = jshGetTWIS(device);
@@ -2273,7 +2334,6 @@ void jshI2CSetup(IOEventFlags device, JshI2CInfo *inf) {
       nrf_drv_twis_enable(twis);
   } else
 #endif
-#if TWI_ENABLED
   {
     const nrf_drv_twi_t *twi = jshGetTWI(device);
     if (!twi) return;
@@ -2285,21 +2345,20 @@ void jshI2CSetup(IOEventFlags device, JshI2CInfo *inf) {
     p_twi_config.frequency =
                       ((inf->bitrate<175000) ? NRF_TWI_FREQ_100K : ((inf->bitrate<325000) ? NRF_TWI_FREQ_250K : NRF_TWI_FREQ_400K));
     p_twi_config.interrupt_priority = APP_IRQ_PRIORITY_LOW;
-    if (twi1Initialised) nrf_drv_twi_uninit(twi);
-    twi1Initialised = true;
+    if (*twiInitialised) nrf_drv_twi_uninit(twi);
+    *twiInitialised = true;
     err_code = nrf_drv_twi_init(twi, &p_twi_config, NULL, NULL);
     if (err_code != NRF_SUCCESS)
       jsExceptionHere(JSET_INTERNALERROR, "I2C Initialisation Error %d", err_code);
     else
       nrf_drv_twi_enable(twi);
   }
-#endif
-  // nrf_drv_spi_init will set pins, but this ensures we know so can reset state later
+  // nrf_drv_twi_init will set pins, but this ensures we know so can reset state later
   if (jshIsPinValid(inf->pinSCL)) {
-    jshPinSetFunction(inf->pinSCL, JSH_I2C1|JSH_I2C_SCL);
+    jshPinSetFunction(inf->pinSCL, pinFuncDevice|JSH_I2C_SCL);
   }
   if (jshIsPinValid(inf->pinSDA)) {
-    jshPinSetFunction(inf->pinSDA, JSH_I2C1|JSH_I2C_SDA);
+    jshPinSetFunction(inf->pinSDA, pinFuncDevice|JSH_I2C_SDA);
   }
 }
 #endif
@@ -2361,8 +2420,8 @@ bool jshFlashGetPage(uint32_t addr, uint32_t * startAddr, uint32_t * pageSize) {
 static void addFlashArea(JsVar *jsFreeFlash, uint32_t addr, uint32_t length) {
   JsVar *jsArea = jsvNewObject();
   if (!jsArea) return;
-  jsvObjectSetChildAndUnLock(jsArea, "addr", jsvNewFromInteger((JsVarInt)addr));
-  jsvObjectSetChildAndUnLock(jsArea, "length", jsvNewFromInteger((JsVarInt)length));
+  jsvObjectSetIntChild(jsArea, "addr", (JsVarInt)addr);
+  jsvObjectSetIntChild(jsArea, "length", (JsVarInt)length);
   jsvArrayPushAndUnLock(jsFreeFlash, jsArea);
 }
 
@@ -2474,7 +2533,7 @@ bool jshFlashErasePages(uint32_t addr, uint32_t byteLength) {
       jshFlashWriteProtect(startAddr + byteLength - 1))
     return false;
   uint32_t err;
-  while (byteLength>=4096 && !jspIsInterrupted()) {
+  while (byteLength>=4096) {
     flashIsBusy = true;
     while ((err = sd_flash_page_erase(startAddr / NRF_FICR->CODEPAGESIZE)) == NRF_ERROR_BUSY);
     if (err!=NRF_SUCCESS) flashIsBusy = false;
@@ -2488,7 +2547,7 @@ bool jshFlashErasePages(uint32_t addr, uint32_t byteLength) {
     jshKickWatchDog();
     jshKickSoftWatchDog();
   }
-  return !jspIsInterrupted();
+  return true;
 }
 
 /**
@@ -2547,6 +2606,7 @@ void jshFlashRead(void * buf, uint32_t addr, uint32_t len) {
  * Writes an array of bytes to memory. Addr must be word aligned and len must be a multiple of 4.
  */
 void jshFlashWrite(void * buf, uint32_t addr, uint32_t len) {
+  assert((len&3)==0); // ensure we're always a multiple of 4 long
   //jsiConsolePrintf("\njshFlashWrite 0x%x addr 0x%x -> 0x%x, len %d\n", *(uint32_t*)buf, (uint32_t)buf, addr, len);
 #ifdef SPIFLASH_BASE
   if ((addr >= SPIFLASH_BASE) && (addr < (SPIFLASH_BASE+SPIFLASH_LENGTH))) {
@@ -2640,40 +2700,42 @@ void jshFlashWrite(void * buf, uint32_t addr, uint32_t len) {
   if (jshFlashWriteProtect(addr)) return;
   uint32_t err = 0;
 
-  if (((size_t)(char*)buf)&3) {
-    /* Unaligned *SOURCE* is a problem on nRF5x,
-     * so if so we are unaligned, do a whole bunch
-     * of tiny writes via a buffer */
-    while (len>=4 && !err) {
-      flashIsBusy = true;
-      uint32_t alignedBuf;
-      memcpy(&alignedBuf, buf, 4);
-      while ((err = sd_flash_write((uint32_t*)addr, &alignedBuf, 1)) == NRF_ERROR_BUSY);
-      if (err!=NRF_SUCCESS) flashIsBusy = false;
-      WAIT_UNTIL(!flashIsBusy, "jshFlashWrite");
-      len -= 4;
-      addr += 4;
-      buf = (void*)(4+(char*)buf);
-    }
-  } else {
-    flashIsBusy = true;
-    uint32_t wordOffset = 0;
-    while (len>0 && !jspIsInterrupted()) {
-      uint32_t l = len;
+  uint32_t wraddr = addr, wrlen = len; // destination + length, we increment these as we write
+  uint8_t *wrbuf = (uint8_t*)buf; // source, we increment this as we write
+  uint8_t alignedBuf[32]; // aligned buffer if writes need it (misaligned source)
+
+  while (wrlen>0) {
+    uint32_t l = wrlen;
+    uint8_t *awrbuf = wrbuf; // write buffer pointer (always updated to be aligned)
 #ifdef NRF51_SERIES
-      if (l>1024) l=1024; // max write size
+    if (l>1024) l=1024; // max write size
 #else // SD 6.1.1 doesn't like flash ops that take too long so we must not write the full 4096 (probably a good plan on older SD too)
-      if (l>2048) l=2048; // max write size
+    if (l>2048) l=2048; // max write size
 #endif
-      len -= l;
-      while ((err = sd_flash_write(((uint32_t*)addr)+wordOffset, ((uint32_t *)buf)+wordOffset, l>>2)) == NRF_ERROR_BUSY && !jspIsInterrupted());
-      wordOffset += l>>2;
+    if (((size_t)wrbuf) & 3) {
+      // Unaligned *SOURCE* is a problem on nRF5x, so if so we are unaligned, do a whole bunch of tiny writes via a buffer
+      if (l>sizeof(alignedBuf)) l=sizeof(alignedBuf); // max write size
+      memcpy(alignedBuf, wrbuf, l);
+      awrbuf = alignedBuf;
     }
+
+    flashIsBusy = true;
+    while ((err = sd_flash_write((uint32_t*)wraddr, (uint32_t*)awrbuf, l>>2)) == NRF_ERROR_BUSY);
     if (err!=NRF_SUCCESS) flashIsBusy = false;
     WAIT_UNTIL(!flashIsBusy, "jshFlashWrite");
+    wrlen -= l;
+    wraddr += l;
+    wrbuf += l;
   }
   if (err!=NRF_SUCCESS)
     jsExceptionHere(JSET_INTERNALERROR,"NRF ERROR 0x%x", err);
+  /* // (slow!) sanity check to ensure that all data is written correctly:
+  for (int i=0;i<len;i++) {
+    uint8_t a = ((uint8_t*)addr)[i];
+    uint8_t b = ((uint8_t*)buf)[i];
+    if (a!=b)
+      jsiConsolePrintf("Write failed at 0x%08x+%d %d!=%d\n", addr,i, a,b);
+  }*/
 }
 
 // Just pass data through, since we can access flash at the same address we wrote it
@@ -2776,10 +2838,35 @@ void jshUtilTimerReschedule(JsSysTime period) {
     period = NRF_TIMER_MAX;
   }
   //jsiConsolePrintf("Sleep for %d %d -> %d\n", (uint32_t)(t>>32), (uint32_t)(t), (uint32_t)(period));
-  if (utilTimerActive) nrf_timer_task_trigger(NRF_TIMER1, NRF_TIMER_TASK_STOP);
-  nrf_timer_task_trigger(NRF_TIMER1, NRF_TIMER_TASK_CLEAR);
-  nrf_timer_cc_write(NRF_TIMER1, NRF_TIMER_CC_CHANNEL0, (uint32_t)period);
-  if (utilTimerActive) nrf_timer_task_trigger(NRF_TIMER1, NRF_TIMER_TASK_START);
+
+  /* Setting the timer is complicated because the compare register only compares for equality,
+  so if we set the compare register even 1 less than the current timer it won't fire for 2^32 microsec
+
+  That would be fine but we're not ever allowed to totally disable interrupts so we have to check *after*
+  we set it just to make sure it hasn't overflowed and if so to redo it.
+  */
+  if (utilTimerActive) { // Reschedule an active timer...
+    // Find out what our last trigger time was
+    uint32_t lastCC = nrf_timer_cc_read(NRF_TIMER1, NRF_TIMER_CC_CHANNEL0);
+    // schedule timer to trigger at the last time we triggered PLUS our period
+    uint32_t thisCC = lastCC + period;
+    bool needsReschedule;
+    do {
+      // set up the timer
+      nrf_timer_cc_write(NRF_TIMER1, NRF_TIMER_CC_CHANNEL0, (uint32_t)thisCC);
+      needsReschedule = false;
+      // Check that the timer hasn't already passed this value? Reschedule it 2us in the future
+      NRF_TIMER1->TASKS_CAPTURE[1] = 1; // get current timer value
+      uint32_t current = NRF_TIMER1->CC[1];
+      if (((int32_t)thisCC - (int32_t)current) < 2) { // it it's closer than 2us (or has already passed!)
+        thisCC = current+2; // reschedule into the future
+        needsReschedule = true;
+      }
+    } while (needsReschedule);
+  } else {
+    // timer is off, it'll be cleared to literally just set the period
+    nrf_timer_cc_write(NRF_TIMER1, NRF_TIMER_CC_CHANNEL0, (uint32_t)period);
+  }
 }
 
 /// Start the timer and get it to interrupt after 'period'
@@ -2787,6 +2874,7 @@ void jshUtilTimerStart(JsSysTime period) {
   jshUtilTimerReschedule(period);
   if (!utilTimerActive) {
     utilTimerActive = true;
+    nrf_timer_task_trigger(NRF_TIMER1, NRF_TIMER_TASK_CLEAR);
     nrf_timer_task_trigger(NRF_TIMER1, NRF_TIMER_TASK_START);
   }
 }
@@ -2818,21 +2906,14 @@ JsVarFloat jshReadTemperature() {
 #endif
 }
 
-// The voltage that a reading of 1 from `analogRead` actually represents
-JsVarFloat jshReadVRef() {
 #ifdef NRF52_SERIES
+nrf_saadc_value_t jshReadVDD(nrf_saadc_input_t pin, nrf_saadc_acqtime_t time, nrf_saadc_gain_t gain) {
   nrf_saadc_channel_config_t config;
-  config.acq_time = NRF_SAADC_ACQTIME_3US;
-  config.gain = NRF_SAADC_GAIN1_6; // 1/6 of input volts
+  config.acq_time = time;
+  config.gain = gain;
   config.mode = NRF_SAADC_MODE_SINGLE_ENDED;
-
-#ifdef ESPR_VREF_VDDH
-  config.pin_p = 0x0D; // Not in Nordic's libs, but this is VDDHDIV5 - we probably want to be looking at VDDH
-  config.pin_n = 0x0D;
-#else
-  config.pin_p = NRF_SAADC_INPUT_VDD;
-  config.pin_n = NRF_SAADC_INPUT_VDD;
-#endif
+  config.pin_p = pin;
+  config.pin_n = pin;
   config.reference = NRF_SAADC_REFERENCE_INTERNAL; // 0.6v reference.
   config.resistor_p = NRF_SAADC_RESISTOR_DISABLED;
   config.resistor_n = NRF_SAADC_RESISTOR_DISABLED;
@@ -2840,21 +2921,32 @@ JsVarFloat jshReadVRef() {
   bool adcInUse = nrf_analog_read_start();
 
   // make reading
-  JsVarFloat f;
+  nrf_saadc_value_t f;
   do {
     nrf_analog_read_interrupted = false;
     nrf_saadc_enable();
     nrf_saadc_resolution_set(NRF_SAADC_RESOLUTION_14BIT);
     nrf_saadc_channel_init(0, &config);
 
-    f = nrf_analog_read() * (6.0 * 0.6 / 16384.0);
+    f = nrf_analog_read();
   } while (nrf_analog_read_interrupted);
   nrf_analog_read_end(adcInUse);
-#ifdef ESPR_VREF_VDDH
-  f *= 5; // we were on VDDHDIV5
+  return f;
+}
 #endif
 
-  return f;
+#if defined(NRF52833) || defined(NRF52840)
+JsVarFloat jshReadVDDH() {
+    return jshReadVDD(0x0D, NRF_SAADC_ACQTIME_20US, NRF_SAADC_GAIN1_2) // When using VDDHDIV5 as input, the acquisition time must be 10 µs or longer.
+    *(2.0 * 5.0 * 0.6 / 16384.0); // gain 1/2, VDDHDIV5, 0.6v reference, 2^14 = 1.0
+}
+#endif
+
+// The voltage that a reading of 1 from `analogRead` actually represents
+JsVarFloat jshReadVRef() {
+#ifdef NRF52_SERIES
+  return jshReadVDD(NRF_SAADC_INPUT_VDD, NRF_SAADC_ACQTIME_3US, NRF_SAADC_GAIN1_6)
+    *(6.0 * 0.6 / 16384.0); // gain 1/6, 0.6v reference, 2^14 = 1.0)
 #else
   const nrf_adc_config_t nrf_adc_config =  {
        NRF_ADC_CONFIG_RES_10BIT,
@@ -2898,7 +2990,7 @@ void jshRebootToDFU() {
 /* Adds the estimated power usage of the microcontroller in uA to the 'devices' object. The CPU should be called 'CPU' */
 void jsvGetProcessorPowerUsage(JsVar *devices) {
   // draws 4mA flat out, 3uA nothing otherwise
-  jsvObjectSetChildAndUnLock(devices, "CPU", jsvNewFromInteger(3 + ((4000 * 273152) / sysTickTime)));
+  jsvObjectSetIntChild(devices, "CPU", 3 + ((4000 * 273152) / sysTickTime));
   // check UART - draws about 1mA when on
   bool uartOn = false;
 #if ESPR_USART_COUNT>0
@@ -2907,14 +2999,14 @@ void jsvGetProcessorPowerUsage(JsVar *devices) {
       uartOn = true;
 #endif
   if (uartOn)
-    jsvObjectSetChildAndUnLock(devices, "UART", jsvNewFromInteger(1000));
+    jsvObjectSetIntChild(devices, "UART", 1000);
   // check if PWM is being used
   bool pwmOn = false;
   for (int i=0;i<JSH_PIN_COUNT;i++)
     if (JSH_PINFUNCTION_IS_TIMER(pinStates[i]))
       pwmOn = true;
   if (pwmOn)
-    jsvObjectSetChildAndUnLock(devices, "PWM", jsvNewFromInteger(200));
+    jsvObjectSetIntChild(devices, "PWM", 200);
 }
 
 
@@ -2924,11 +3016,11 @@ void jsvGetProcessorPowerUsage(JsVar *devices) {
 void COMP_LPCOMP_IRQHandler() {
   if (nrf_lpcomp_event_check(NRF_LPCOMP_EVENT_UP) && nrf_lpcomp_int_enable_check(LPCOMP_INTENSET_UP_Msk)) {
     nrf_lpcomp_event_clear(NRF_LPCOMP_EVENT_UP);
-    jshPushIOEvent(EV_CUSTOM, EVC_LPCOMP | EVC_DATA_LPCOMP_UP);
+    jshPushCustomEvent(EVC_LPCOMP | EVC_DATA_LPCOMP_UP);
   }
   if (nrf_lpcomp_event_check(NRF_LPCOMP_EVENT_DOWN) && nrf_lpcomp_int_enable_check(LPCOMP_INTENSET_DOWN_Msk)) {
     nrf_lpcomp_event_clear(NRF_LPCOMP_EVENT_DOWN);
-    jshPushIOEvent(EV_CUSTOM, EVC_LPCOMP);
+    jshPushCustomEvent(EVC_LPCOMP);
   }
 }
 

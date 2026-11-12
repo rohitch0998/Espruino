@@ -1,0 +1,456 @@
+// espruino epaper badge JS code
+/*
+
+Badge.getTemperature().then(print);
+Badge.getAccel().then(print);
+Badge.setLEDs("#f00");
+
+Badge.showTestScreen();
+Badge.showImageFile("img.raw");
+Badge.showRendering(function(g) { // Colors are: 0=black, 1=white, 2=yellow, 3=red
+  g.clear().setColor(1).setFontVector(300).setFontAlign(0,0).drawString("Hello",400,240);
+});
+*/
+(function(){
+const i2c = new I2C();
+const spi = SPI1;
+global.Badge = {
+  i2c : i2c,
+  spi : spi,
+  led_rgb : new Uint8Array(3*10), // RGB buffer for LEDs
+  epaperBusy : false,
+  REV : 1.2 // PCB rev
+};
+
+const LED_ON = (Badge.REV>1.0)?1:0;
+global.LED_EN = (Badge.REV>1.1)?D4:D20;
+global.LED_DATA = (Badge.REV>1.1)?D20:D21;
+
+i2c.setup({sda:D5, scl:D6});
+// ePaper
+spi.setup({ baud : 4000000, sck : D7, mosi: D8 });
+const CS = (Badge.REV>1.1)?D10:D4, DC = (Badge.REV>1.1)?D21:D10, RST = D1, BUSY = D0;
+const Source_BITS  = 800;
+const Gate_BITS   = 680;
+const ALLSCREEN_BYTES =  96000;
+
+
+require("neopixel").write(LED_DATA, Badge.led_rgb); // set all neopixels to off
+
+//i2c.readReg(0x38, 0,1); // AHT20
+//i2c.readReg(0x1E, 0,1); // KX022-1020
+Badge.getTemperature = function() {
+  const AHT20_ADDR = 0x38;
+  return new Promise(resolve => {
+    // 1. Initialize the sensor (Command 0xBE with params 0x08, 0x00)
+    // This is required once on startup, but safe to run before a measurement.
+    i2c.writeTo(AHT20_ADDR, [0xBE, 0x08, 0x00]);
+    setTimeout(function() { // Wait for calibration/initialization to complete
+      // 2. Trigger Measurement (Command 0xAC with params 0x33, 0x00)
+      i2c.writeTo(AHT20_ADDR, [0xAC, 0x33, 0x00]);
+      setTimeout(function() { // Crucial: Wait 80ms for the measurement to complete
+        // 3. Read 6 bytes of data (using 0x71 as the status/read command)
+        const data = i2c.readReg(AHT20_ADDR, 0x71, 6);
+        // 4. Check if the sensor is busy (Bit 7 of the status byte)
+        const isBusy = (data[0] & 0x80) !== 0;
+        if (isBusy) {
+          throw new Error("Sensor is busy, measurement not ready.");
+        }
+        // 5. Parse Humidity (20-bit value split across bytes 1, 2, and high nibble of 3)
+        const rawHumidity = ((data[1] << 12) | (data[2] << 4) | (data[3] >> 4));
+        const humidity = (rawHumidity / Math.pow(2, 20)) * 100;
+        // 6. Parse Temperature (20-bit value split across low nibble of 3, 4, and 5)
+        const rawTemperature = (((data[3] & 0x0F) << 16) | (data[4] << 8) | data[5]);
+        const temperature = ((rawTemperature / Math.pow(2, 20)) * 200) - 50;
+
+        resolve({
+          temperature: temperature, // in °C
+          humidity: humidity        // in % RH
+        });
+      }, 80);
+    }, 10);
+  });
+};
+
+Badge.getAccel = function() {
+  let promise;
+  const KX_ADDR = 0x1E;
+  // CNTL1 register (0x18): Set PC1 bit (bit 7) to 1 to enable Active Mode.
+  // We keep default settings: G-range of +/-2g, and 16-bit resolution.
+  i2c.writeTo(KX_ADDR, [0x18, 0x80]);
+  // Now return the result after a pause
+  return new Promise(resolve => {
+    setTimeout(function() {
+      // Read 6 bytes starting from XOUT_L (0x06) through ZOUT_H (0x0B)
+      const data = i2c.readReg(KX_ADDR, 0x06, 6);
+      // set to inactive
+      i2c.writeTo(KX_ADDR, [0x18, 0x00]);
+      // return result
+      resolve((new Int16Array(data.buffer)).slice().map(n => n/16384));
+    }, 20);
+  });
+};
+
+/// Set all LEDs to one colour - can be used with rgb values, or `Badge.setLEDs("#0f0")`
+Badge.setLEDs = function(r,g,b) {
+  var g = Graphics.createArrayBuffer(1,1,24,{color_order:"brg"}); // use 24 bit GFX to convert color types/strings
+  var col = g.toColor(r,g,b);
+  if (col==0) return LED_EN.write(!LED_ON); // LEDs off
+  LED_EN.write(LED_ON); // LEDs on
+  let arr = new Uint24Array(Badge.led_rgb.buffer);
+  arr.fill(col);
+  require("neopixel").write(LED_DATA, Badge.led_rgb);
+};
+
+/// Set LEDs individually. Supply 30-element RGB array, or 'undefined' uses Badge.led_rgb
+Badge.setLEDArray = function(arr) {
+  if (arr!==undefined) Badge.led_rgb.set(arr);
+  LED_EN.write(LED_ON); // LEDs on
+  require("neopixel").write(LED_DATA, Badge.led_rgb);
+};
+
+// ePaper
+CS.set();
+DC.set();
+RST.set();
+BUSY.read();
+
+// epaper: write command
+function eC(command) {
+	CS.reset();
+	DC.reset();  // D/C#   0:command  1:data
+	spi.write(command);
+	CS.set();
+}
+// epaper: write data
+function eD(datas) {
+	CS.reset();
+	DC.set();  // D/C#   0:command  1:data
+	spi.write(datas);
+	CS.set();
+}
+// hacky in-place delay (returns promise)
+function delay_ms(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+// wait for not busy (returns promise)
+function epdWait() {
+  return new Promise(resolve => {
+    function poll() {
+      if (BUSY.read()) resolve();
+      else setTimeout(poll,1);
+    }
+    poll();
+  });
+}
+// init epd - return a promise
+function epdInit() {
+	return delay_ms(20).then(() => {//At least 20ms delay
+	  RST.reset();		// Module reset
+	  return delay_ms(10); //At least 10ms delay
+  }).then(() => {
+	  RST.set();
+	  return delay_ms(10); //At least 10ms delay
+  }).then(() => epdWait() //waiting for the electronic paper IC to release the idle signal
+  ).then(() => {
+    eC(0x00);	//0x00
+    eD(0x2B);
+    eD(0x29);
+
+    eC(0x06);	//0x06
+    eD(0x0F);
+    eD(0x8B);
+    eD(0x93);
+    eD(0xC1); //0xC1
+
+    eC(0x50);	//0x50
+    eD(0x37);
+
+    eC(0x30);	//0x30
+    eD(0x08);
+
+    eC(0x61);//0x61
+    eD(Source_BITS/256);
+    eD(Source_BITS%256);
+    eD(Gate_BITS/256);
+    eD(Gate_BITS%256);
+
+    eC(0x62);
+    eD(0x76);
+    eD(0x76);
+    eD(0x76);
+    eD(0x5A);
+    eD(0x9D);
+    eD(0x8A);
+    eD(0x76);
+    eD(0x62);
+
+    eC(0x65);	//0x65
+    eD(0x00);
+    eD(0x00);
+    eD(0x00);
+    eD(0x00);
+
+    eC(0xE0);	//0xE3
+    eD(0x10);
+
+    eC(0xE7);	//0xE7
+    eD(0xA4);
+
+    eC(0xE9);
+    eD(0x01);
+
+    //Fast
+    eC(0xEF);
+    eD(0x01);
+    eC(0xF6);
+    eD(0x20);
+
+    eC(0xEF);
+    eD(0x00);
+
+    eC(0xE0);
+    eD(0x12);
+
+    eC(0xE6);
+    eD(92);
+
+    eC(0xA5);
+    eD(0x00);
+	  return epdWait();
+  }).then(() => {
+	  eC(0x04); //Power on
+	  return epdWait();          //waiting for the electronic paper IC to release the idle signal
+  });
+}
+// Sleep EPD - return promise
+function epdSleep() {
+  eC(0X02);   //power off
+  eD(0x00);
+  return epdWait().then(() => {          //waiting for the electronic paper IC to release the idle signal
+    eC(0X07);   //deep sleep
+    eD(0xA5);
+  });
+}
+// Actually update what's on the display. Returns promise, takes ~12 sec
+function epdUpdate(){
+  eC(0x12); //Display Update Control
+  eD(0x00);
+  return epdWait();
+}
+
+/* Return a 400x240 2bpp graphics instance, which you can call `.flip()` on to update the screen.
+   0=black, 1=white, 2=yellow, 3=red */
+Badge.getGraphics = function() {
+  var g = Graphics.createArrayBuffer(400,240,2); /* 0=black, 1=white, 2=yellow, 3=red */
+
+  g.flip = function() {
+    if (Badge.epaperBusy) throw new Error("ePaper is busy");
+    Badge.epaperBusy = true;
+    return epdInit().then(() => {
+      eC(0x10);
+
+      var line = new Uint16Array(100);
+      /*var lut = new Uint16Array(256);
+      for (var i=0;i<256;i++) lut[i] = (((i&0x03)<<8) | ((i&0x0C)<<10) | ((i&0x30)>>4) | ((i&0xC0)>>2)) * 0b0101;
+      print(btoa(lut.buffer))*/
+      var lut = new Uint16Array(E.toArrayBuffer(atob("AAAABQAKAA8AUABVAFoAXwCgAKUAqgCvAPAA9QD6AP8FAAUFBQoFDwVQBVUFWgVfBaAFpQWqBa8F8AX1BfoF/woACgUKCgoPClAKVQpaCl8KoAqlCqoKrwrwCvUK+gr/DwAPBQ8KDw8PUA9VD1oPXw+gD6UPqg+vD/AP9Q/6D/9QAFAFUApQD1BQUFVQWlBfUKBQpVCqUK9Q8FD1UPpQ/1UAVQVVClUPVVBVVVVaVV9VoFWlVapVr1XwVfVV+lX/WgBaBVoKWg9aUFpVWlpaX1qgWqVaqlqvWvBa9Vr6Wv9fAF8FXwpfD19QX1VfWl9fX6BfpV+qX69f8F/1X/pf/6AAoAWgCqAPoFCgVaBaoF+goKCloKqgr6DwoPWg+qD/pQClBaUKpQ+lUKVVpVqlX6WgpaWlqqWvpfCl9aX6pf+qAKoFqgqqD6pQqlWqWqpfqqCqpaqqqq+q8Kr1qvqq/68ArwWvCq8Pr1CvVa9ar1+voK+lr6qvr6/wr/Wv+q//8ADwBfAK8A/wUPBV8FrwX/Cg8KXwqvCv8PDw9fD68P/1APUF9Qr1D/VQ9VX1WvVf9aD1pfWq9a/18PX19fr1//oA+gX6CvoP+lD6Vfpa+l/6oPql+qr6r/rw+vX6+vr//wD/Bf8K/w//UP9V/1r/X/+g/6X/qv+v//D/9f/6//8=")));
+      for (var y=0;y<240;y++) {
+        E.mapInPlace(new Uint8Array(g.buffer, y*100, 100), line, lut);
+        eD(line.buffer);
+        eD(line.buffer);
+      }
+      return epdUpdate();
+    }).then(epdSleep).then(() => {
+      Badge.epaperBusy = false;
+    });
+  };
+  return g;
+}
+
+Badge.showTestScreen = function() {
+  return Badge.showRendering(function(g) {
+    g.setColor(1).drawRect(0,0,399,239).drawRect(1,1,398,238);
+    g.setBgColor(1).clear();
+    for (var i=0;i<4;i++) g.setColor(i).fillRect(i*40,0,(i+1)*40,479);
+    g.setColor(0);
+    for (var i=0;i<480;i+=10) g.drawLine(799,i, 799-i,479);
+    g.setColor(0).setFontVector(80).setFontAlign(0,0).drawString("Hello World",400,240);
+    var env = process.env, mem=process.memory();
+    g.setFont("6x8:2").setFontAlign(0,0).drawString(`Espruino ${env.VERSION} (${env.GIT_COMMIT})
+https://espruino.com/Badge
+${env.BOARD}
+${mem.free} / ${mem.total} vars free
+`,400,320);
+  });
+};
+
+/* Call this with a string or an Error object to display an error String */
+Badge.showError = function(error) {
+  require("Storage").write("showing", "error");
+  let stack = ((error instanceof Object) && error.stack) ? error.stack : undefined;
+  let msg = (error instanceof Object) ? error.message : error.toString();
+  let qrcode = atob("QEABAAAAAAAAAAAAAAAAAAAAAD//hgf/+f/8P/+GB//5//wwAZnmAfmADDABmeYB+YAMM/mGeH+Bn8wz+YZ4f4GfzDP5nmBmGZ/MM/meYGYZn8wz+Zhnh4GfzDP5mGeHgZ/MM/mYZ4eBn8wwAZ4AAZmADDABngABmYAMP/+ZmZmZ//w//5mZmZn//AAAAZnhgAAAAAABmeGAAAAM+fnmf/5/MAz5+eZ//n8wDAYeBmeHgDAMBh4GZ4eAMAD//4YAB5/wAP//hgAHn/AzBgYeYBgAzDMGBh5gGADMM8GAGBgGHPwzwYAYGAYc/DA4eeHnn4A8MDh54eefgDwwwZgBgB5/wDDBmAGAHn/AMwZ+BmGf4DAzBn4GYZ/gMDDBgB/+GB/AMMGAH/4YH8Aw/gBn/5n/ADD+AGf/mf8APweZ4GYHnMA/B5ngZgecwDD4GBmHmfwMMPgYGYeZ/AwPB+Zhnh/8zA8H5mGeH/zMAAAZmeB4HPwAABmZ4Hgc/D//mZ/geZwwP/+Zn+B5nDAwAYfhmHgfzDABh+GYeB/MM/meZn4f/Pwz+Z5mfh/8/DP5nmZ+H/z8M/mZ+f4eYAAz+Zn5/h5gADP5hgZmf4AwM/mGBmZ/gDAwAZ4YABnjwDABnhgAGePAP/+AZ5ngAPA//4BnmeAA8AAAAAAAAAAAAAAAAAAAAAA=");
+  return Badge.showRendering(function(g) {
+    g.setBgColor(3).clearRect(0,0,799,479);
+    g.setBgColor(1).clearRect(20,20,779,459);
+    let x=250,y=120;
+    g.setColor(3).fillCircle(x,y,50).setColor(2).fillPoly([x,y-40, x-42,y+24, x+42,y+24]).setColor(0).setFontVector(60).setFontAlign(0,0).drawString("!",x+4,y);
+    g.setColor(3).setFontVector(80).setFontAlign(0,0).drawString("ERROR",470,120);
+    g.setColor(0).setFont("6x8:3").setFontAlign(0,-1).drawString(msg,400,196);
+    if (stack) g.setFont("6x8:2").setFontAlign(-1,-1).drawString(stack, 30, 240);
+    var env = process.env, mem=process.memory();
+    g.setFont("6x8:2").setFontAlign(-1,-1).drawString(`Espruino ${env.VERSION} (${env.GIT_COMMIT}) ${env.BOARD}  ${(new Date()).toString().substr(4,17)}
+https://espruino.com/Badge  ${mem.free} / ${mem.total} vars free
+`,30,30);
+    g.setFontAlign(-1,1).drawString("See https://espruino.com/Badge for more info",30,450);
+    g.drawImage(qrcode, 770-128,450-128,{scale:2});
+  });
+};
+
+/* Show full-res 800x480 graphics on the display. We don't have a full-size
+buffer for this, so we have a callback which is called to render each
+slice in turn. Just render as-normal in gfxCallback.
+0=black, 1=white, 2=yellow, 3=red */
+Badge.showRendering = function(gfxCallback) {
+  if (Badge.epaperBusy) throw new Error("ePaper is busy");
+  Badge.epaperBusy = true;
+  return epdInit().then(() => {
+    eC(0x10);
+    var g = Graphics.createArrayBuffer(800,48,2); /* 0=black, 1=white, 2=yellow, 3=red */
+    for (var y=0;y<480;y+=48) {
+      g.clear(1).setOffset(0,-y).setColor(1);
+      gfxCallback(g);
+      eD(g.buffer);
+    }
+    return epdUpdate();
+  }).then(epdSleep).then(() => {
+    Badge.epaperBusy = false;
+  });
+};
+
+/* Works as per showRendering, but dumps the image to the console as a URLencoded
+BMP file, which the Web IDE can interpret */
+Badge.dumpRendering = function(gfxCallback) {
+  var dev = eval(E.getConsole());
+  var fs = 75 + (800*840/2);
+  dev.println(""); // removes prompt from line
+  dev.write("data:image/bmp;base64,");
+  dev.write(btoa(E.toString([66, 77,
+            fs&255, (fs>>8)&255, (fs>>16)&255, fs>>24, // filesize
+            0, 0, 0, 0, 75, 0, 0, 0, 12, 0, 0, 0,
+            32, 3,  // 800
+            224, 1,  // 480
+            1, 0, 4,
+            0, 0, 0, 0, 255, 255, 255,  0x33, 0xcc, 0xff,  0x27, 0x37, 0xdb,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0])));
+
+  var g = Graphics.createArrayBuffer(800,12,2); /* 0=black, 1=white, 2=yellow, 3=red */
+  g.palette = new Uint16Array([0,0xFFFF,65126,55716]);
+  for (var y=468;y>=0;y-=12) {
+    g.clear(1).setOffset(0,-y).setColor(1);
+    gfxCallback(g);
+    g.setOffset(0,0);
+    dev.write(btoa(g.asBMP().substr(74)));
+  }
+  dev.write("\n");
+  return Promise.resolve();
+};
+
+/* Load a raw 800x480x2 image file from storage, return a Promise
+0=black, 1=white, 2=yellow, 3=red */
+Badge.showImageFile = function(filename) {
+  if (Badge.epaperBusy) throw new Error("ePaper is busy");
+  Badge.epaperBusy = true;
+  return epdInit().then(() => {
+    eC(0x10);
+    let img = require("Storage").read(filename);
+    if (!img) throw new Error(`File "${filename}" not found`);
+    eD(img);
+    return epdUpdate();
+  }).then(epdSleep).then(() => {
+    Badge.epaperBusy = false;
+  });
+};
+
+/* Load a raw 800x480x2 image file from storage, but call gfxCallback with a Graphics instance on the first 800xheight slice, return a Promise
+0=black, 1=white, 2=yellow, 3=red */
+Badge.showImageFileRendering = function(filename, height, gfxCallback) {
+  if (Badge.epaperBusy) throw new Error("ePaper is busy");
+  Badge.epaperBusy = true;
+  return epdInit().then(() => {
+    eC(0x10);
+    let img = require("Storage").read(filename);
+    if (!img) throw new Error(`File "${filename}" not found`);
+    let g = Graphics.createArrayBuffer(800,height,2);
+    g.setBgColor(1).setColor(0);
+    new Uint8Array(g.buffer).set(img);
+    gfxCallback(g);
+    eD(g.buffer); // render the modified bit
+    eD(img.substr(800*height>>2)); // render the rest
+    return epdUpdate();
+  }).then(epdSleep).then(() => {
+    Badge.epaperBusy = false;
+  });
+};
+
+/* Show raw image data on the ePaper. rawCallback(data,done) is called.
+`data` should be called with 800*480*2bpp = 96000bytes (over multiple calls)
+and finally `done` is called at the end. */
+Badge.showRaw = function(rawCallback) {
+  if (Badge.epaperBusy) throw new Error("ePaper is busy");
+  Badge.epaperBusy = true;
+  return epdInit().then(() => new Promise(resolve => {
+    eC(0x10);
+    rawCallback(eD, resolve);
+  })).then(() => epdUpdate()
+  ).then(epdSleep).then(() => {
+    Badge.epaperBusy = false;
+  });
+};
+
+// Puts the badge to sleep, waiting to restart on a button press. The button can be read with ESP32.getWakeupPin()
+Badge.sleep = function() {
+  LED_EN.write(!LED_ON); // LEDs off
+  ESP32.deepSleepExt1([BTN1,BTN2],0); // wait for buttons
+};
+
+/// Connect to wifi using details in wifi.json ({"ssid":"--","options":{"password":"---"}},"backup_ssid":..,"backup_options":{}). Returns a promise which completes on success or rejects on failure
+Badge.connectWiFi = function() {
+  global.WIFI_INFO=require("Storage").readJSON("wifi.json",1)||{};
+  if (!WIFI_INFO.ssid) {
+    Badge.setLEDs("#101");
+    Badge.showError("No WiFi Details\n\nConnect via Bluetooth/USB\nand write wifi.json");
+    return new Promise(resolve => {}); // return a promise that never resolves
+  }
+  return new Promise((resolve,reject) => {
+    require("Wifi").connect(WIFI_INFO.ssid, WIFI_INFO.options, function(err) {
+      if (err) {
+        console.log("WiFi error: "+err);
+        if (WIFI_INFO.backup_ssid !== undefined) {
+          console.log("Trying backup WiFi "+E.toJS(WIFI_INFO.backup_ssid));
+          return require("Wifi").connect(WIFI_INFO.backup_ssid, WIFI_INFO.backup_options, function(berr) {
+            if (berr) {
+              console.log("Backup WiFi error: "+berr);
+              return reject(`WiFi error: ${err}\nBackup WiFi error: ${berr}`);
+            } // Otherwise WiFi is ok
+            console.log("WiFi Connected - Swap default to backup");
+            let t = WIFI_INFO.ssid;
+            WIFI_INFO.ssid = WIFI_INFO.backup_ssid;
+            WIFI_INFO.backup_ssid = t;
+            t = WIFI_INFO.options;
+            WIFI_INFO.options = WIFI_INFO.backup_options;
+            WIFI_INFO.backup_options = t;
+            require("Storage").writeJSON("wifi.json",WIFI_INFO);
+            resolve();
+          });
+        }
+        return reject(`WiFi error: ${err}\n`);
+      }
+      console.log("WiFi Connected");
+      resolve();
+    });
+  });
+};
+
+})();

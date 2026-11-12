@@ -26,7 +26,7 @@ info = {
 # 'default_console_baudrate' : "9600",
  'variables' : 12000, # How many variables are allocated for Espruino to use. RAM will be overflowed if this number is too high and code won't compile.
                       # Currently leaves around 38k of free stack - *loads* more than we need
- 'io_buffer_size' : 512, # How big is the input buffer (in 4 byte words). Default on nRF52 is 256
+ 'io_buffer_size' : 2048, # How big is the input buffer (in bytes). Default on nRF52 is 1024
  'bootloader' : 1,
  'binary_name' : 'espruino_%v_banglejs2.hex',
  'build' : {
@@ -36,7 +36,7 @@ info = {
      'TERMINAL',
      'GRAPHICS',
      'CRYPTO','SHA256','SHA512',
-     'AES_CCM',
+     'AES','AES_CCM',
      'LCD_MEMLCD',
      'TENSORFLOW',
      'SWDCON', # RTT console over SWD
@@ -50,27 +50,32 @@ info = {
      #'DEFINES += -DESPR_REGOUT0_1_8V=1', # this increases power draw, so probably not correct!
      'DEFINES += -DESPR_LSE_ENABLE', # Ensure low speed external osc enabled
      'DEFINES += -DNRF_SDH_BLE_GATT_MAX_MTU_SIZE=131', # 23+x*27 rule as per https://devzone.nordicsemi.com/f/nordic-q-a/44825/ios-mtu-size-why-only-185-bytes
+     'DEFINES += -DNRF_SDH_BLE_GAP_EVENT_LENGTH=6', # Needed to allow coded phy connections
      'DEFINES += -DCENTRAL_LINK_COUNT=2 -DNRF_SDH_BLE_CENTRAL_LINK_COUNT=2', # allow two outgoing connections at once
-     'LDFLAGS += -Xlinker --defsym=LD_APP_RAM_BASE=0x3660', # set RAM base to match MTU=131 + CENTRAL_LINK_COUNT=2
+     'LDFLAGS += -Xlinker --defsym=LD_APP_RAM_BASE=0x3b70', # set RAM base to match MTU=131 + CENTRAL_LINK_COUNT=2 + GAP_EVENT_LENGTH=6
      'DEFINES += -DESPR_DCDC_ENABLE=1', # Use DC/DC converter
      'ESPR_BLUETOOTH_ANCS=1', # Enable ANCS (Apple notifications) support
      'DEFINES += -DSPIFLASH_SLEEP_CMD', # SPI flash needs to be explicitly slept and woken up
      'DEFINES += -DSPIFLASH_READ2X', # Read SPI flash at 2x speed using MISO and MOSI for IO
      'DEFINES += -DESPR_JSVAR_FLASH_BUFFER_SIZE=32', # The buffer size we use when executing/iterating over data in flash memory (default 16). Should be set based on benchmarks.
      'DEFINES += -DAPP_TIMER_OP_QUEUE_SIZE=6', # Bangle.js accelerometer poll handler needs something else in queue size
-     'DEFINES+=-DBLUETOOTH_NAME_PREFIX=\'"Bangle.js"\'',
+     'DEFINES+=-DBLUETOOTH_NAME_PREFIX="Bangle.js"',
      'DEFINES+=-DCUSTOM_GETBATTERY=jswrap_banglejs_getBattery',
      'DEFINES+=-DESPR_UNICODE_SUPPORT=1',
-     'DEFINES+=-DDUMP_IGNORE_VARIABLES=\'"g\\0"\'',
+     'DEFINES+=-DDUMP_IGNORE_VARIABLES="g\\0"',
      'DEFINES+=-DESPR_GRAPHICS_INTERNAL=1',
      'DEFINES+=-DESPR_BATTERY_FULL_VOLTAGE=0.3144',
      'DEFINES+=-DUSE_FONT_6X8 -DGRAPHICS_PALETTED_IMAGES -DGRAPHICS_ANTIALIAS -DESPR_PBF_FONTS',
      'DEFINES+=-DNO_DUMP_HARDWARE_INITIALISATION', # don't dump hardware init - not used and saves 1k of flash
-     'DEFINES += -DESPR_NO_LINE_NUMBERS=1', # we execute mainly from flash, so line numbers can be worked out
      'INCLUDE += -I$(ROOT)/libs/banglejs -I$(ROOT)/libs/misc',
      'WRAPPERSOURCES += libs/banglejs/jswrap_bangle.c',
+     'WRAPPERSOURCES += libs/graphics/jswrap_font_14.c',
+     'WRAPPERSOURCES += libs/graphics/jswrap_font_17.c',
+     'WRAPPERSOURCES += libs/graphics/jswrap_font_22.c',
+     'WRAPPERSOURCES += libs/graphics/jswrap_font_28.c',
      'WRAPPERSOURCES += libs/graphics/jswrap_font_6x15.c',
      'WRAPPERSOURCES += libs/graphics/jswrap_font_12x20.c',
+     'DEFINES+=-DESPR_FONT_14 -DESPR_FONT_17 -DESPR_FONT_22 -DESPR_FONT_28 -DESPR_FONT_6x15 -DESPR_FONT_12x20',
      'SOURCES += libs/misc/nmea.c',
      'SOURCES += libs/misc/stepcount.c',
      'SOURCES += libs/misc/hrm_vc31.c',
@@ -114,10 +119,10 @@ chip = {
   'adc' : 1,
   'dac' : 0,
   'saved_code' : {
-#    'address' : ((246 - 20) * 4096), # Bootloader takes pages 248-255, FS takes 246-247
+#    'address' : ((245 - 20) * 4096), # Bootloader takes pages 248-255, FS takes 245-247
     'page_size' : 4096,
 #    'pages' : 20,
-    'flash_available' : 1024 - ((38 + 8 + 2 + 20)*4), # Softdevice uses 0x26=38 pages of flash, bootloader 8, FS 2, code 20. Each page is 4 kb.
+    'flash_available' : 1024 - ((38 + 8 + 3 + 20)*4), # Softdevice uses 0x26=38 pages of flash, bootloader 8, FS 3, code 20. Each page is 4 kb.
 #    'address2' : 0x60000000, # put this in external spiflash (see below)
 #    'pages2' : 2048, # Entire 8MB of external flash
 

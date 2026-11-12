@@ -194,7 +194,7 @@ int jswrap_string_indexOf(JsVar *parent, JsVar *substring, JsVar *fromIndex, boo
     return -1;
   }
   int lastPossibleSearch = parentLength - subStringLength;
-  int idx, dir, end;
+  int idx, dir, end, r=-1;
   if (!lastIndexOf) { // normal indexOf
     dir = 1;
     end = lastPossibleSearch+1;
@@ -204,6 +204,29 @@ int jswrap_string_indexOf(JsVar *parent, JsVar *substring, JsVar *fromIndex, boo
       if (idx<0) idx=0;
       if (idx>end) idx=end;
     }
+#ifndef SAVE_ON_FLASH
+    /* if we're not trying to save memory, use StringIterator
+    to avoid us having to search to each char in the string which
+    can be slow for non-flat or external strings. Sadly we can't
+    do this when going backwards (esp for UTF8) so leave old
+    behaviour for lastIndexOf */
+    JsvStringIterator it;
+    jsvStringIteratorNewUTF8(&it, parent, idx);
+    while (jsvStringIteratorHasChar(&it)) {
+      JsvStringIterator itclone;
+      jsvStringIteratorClone(&itclone, &it);
+      int cmp = jsvCompareStringIt(&itclone, substring, 0, false, true);
+      jsvStringIteratorFree(&itclone);
+      if (cmp==0) {
+        r = idx;
+        break;
+      }
+      jsvStringIteratorNextUTF8(&it);idx++;
+    }
+    jsvStringIteratorFree(&it);
+    jsvUnLock(substring);
+    return r;
+#endif
   } else {
     dir = -1;
     end = -1;
@@ -216,13 +239,13 @@ int jswrap_string_indexOf(JsVar *parent, JsVar *substring, JsVar *fromIndex, boo
   }
 
   for (;idx!=end;idx+=dir) {
-    if (jsvCompareString(parent, substring, (size_t)idx, 0, true)==0) {
-      jsvUnLock(substring);
-      return idx;
+    if (jsvCompareString(parent, substring, (size_t)idx, 0, false, true)==0) {
+      r = idx;
+      break;
     }
   }
   jsvUnLock(substring);
-  return -1;
+  return r;
 }
 
 /*JSON{
@@ -267,7 +290,7 @@ JsVar *jswrap_string_match(JsVar *parent, JsVar *subStr) {
 #ifndef SAVE_ON_FLASH
   // Use RegExp if one is passed in
   if (jsvIsInstanceOf(subStr, "RegExp")) {
-    jsvObjectSetChildAndUnLock(subStr, "lastIndex", jsvNewFromInteger(0));
+    jsvObjectSetIntChild(subStr, "lastIndex", 0);
     JsVar *match;
     match = jswrap_regexp_exec(subStr, parent);
     if (!jswrap_regexp_hasFlag(subStr,'g')) {
@@ -286,11 +309,11 @@ JsVar *jswrap_string_match(JsVar *parent, JsVar *subStr) {
       jsvArrayPushAndUnLock(array, matchStr);
       // search again
       jsvUnLock(match);
-      jsvObjectSetChildAndUnLock(subStr, "lastIndex", jsvNewFromInteger(last + (len?0:1)));
+      jsvObjectSetIntChild(subStr, "lastIndex", last + (len?0:1));
       match = jswrap_regexp_exec(subStr, parent);
     }
     jsvUnLock(match);
-    jsvObjectSetChildAndUnLock(subStr, "lastIndex", jsvNewFromInteger(0));
+    jsvObjectSetIntChild(subStr, "lastIndex", 0);
     return array;
   }
 #endif
@@ -306,7 +329,7 @@ JsVar *jswrap_string_match(JsVar *parent, JsVar *subStr) {
       }
 
       jsvArrayPush(array, subStr);
-      jsvObjectSetChildAndUnLock(array, "index", jsvNewFromInteger(idx));
+      jsvObjectSetIntChild(array, "index", idx);
       jsvObjectSetChildAndUnLock(array, "input", subStr);
       return array;
   }
@@ -324,7 +347,7 @@ static JsVar *_jswrap_string_replace(JsVar *parent, JsVar *subStr, JsVar *newSub
       replace = jsvLockAgain(newSubStr);
     else
       replace = jsvAsString(newSubStr);
-    jsvObjectSetChildAndUnLock(subStr, "lastIndex", jsvNewFromInteger(0));
+    jsvObjectSetIntChild(subStr, "lastIndex", 0);
     bool global = jswrap_regexp_hasFlag(subStr,'g');
     if (replaceAll) global = true;
     JsVar *newStr = jsvNewFromEmptyString();
@@ -382,7 +405,7 @@ static JsVar *_jswrap_string_replace(JsVar *parent, JsVar *subStr, JsVar *newSub
       jsvUnLock(match);
       match = 0;
       if (global) {
-        jsvObjectSetChildAndUnLock(subStr, "lastIndex", jsvNewFromInteger(lastIndex + (len?0:1)));
+        jsvObjectSetIntChild(subStr, "lastIndex", lastIndex + (len?0:1));
         match = jswrap_regexp_exec(subStr, str);
       }
     }
@@ -391,7 +414,7 @@ static JsVar *_jswrap_string_replace(JsVar *parent, JsVar *subStr, JsVar *newSub
     jsvUnLock3(match,replace,str);
     // reset lastIndex if global
     if (global)
-      jsvObjectSetChildAndUnLock(subStr, "lastIndex", jsvNewFromInteger(0));
+      jsvObjectSetIntChild(subStr, "lastIndex", 0);
     return newStr;
   }
 #endif
@@ -550,7 +573,7 @@ JsVar *jswrap_string_split(JsVar *parent, JsVar *split) {
   if (jsvIsInstanceOf(split, "RegExp")) {
     int last = 0;
     JsVar *match;
-    jsvObjectSetChildAndUnLock(split, "lastIndex", jsvNewFromInteger(0));
+    jsvObjectSetIntChild(split, "lastIndex", 0);
     match = jswrap_regexp_exec(split, parent);
     while (match && !jsvIsNull(match)) {
       // get info about match
@@ -563,11 +586,11 @@ JsVar *jswrap_string_split(JsVar *parent, JsVar *split) {
       last = idx+len;
       // search again
       jsvUnLock(match);
-      jsvObjectSetChildAndUnLock(split, "lastIndex", jsvNewFromInteger(last));
+      jsvObjectSetIntChild(split, "lastIndex", last);
       match = jswrap_regexp_exec(split, parent);
     }
     jsvUnLock(match);
-    jsvObjectSetChildAndUnLock(split, "lastIndex", jsvNewFromInteger(0));
+    jsvObjectSetIntChild(split, "lastIndex", 0);
     // add remaining string after last match
     if (last <= (int)jsvGetStringLength(parent))
       jsvArrayPushAndUnLock(array, jsvNewFromStringVar(parent, (size_t)last, JSVAPPENDSTRINGVAR_MAXLENGTH));
@@ -583,7 +606,7 @@ JsVar *jswrap_string_split(JsVar *parent, JsVar *split) {
 
   for (idx=0;idx<=l;idx++) {
     if (splitlen==0 && idx==0) continue; // special case for where split string is ""
-    if (idx==l || splitlen==0 || jsvCompareString(parent, split, (size_t)idx, 0, true)==0) {
+    if (idx==l || splitlen==0 || jsvCompareString(parent, split, (size_t)idx, 0, false, true)==0) {
       if (idx==l) {
         idx=l+splitlen; // if the last element, do to the end of the string
         if (splitlen==0) break;
@@ -809,7 +832,7 @@ bool jswrap_string_startsWith(JsVar *parent, JsVar *search, int position) {
   bool match = false;
   if (position >= 0 &&
       (int)jsvGetStringLength(searchStr)+position <= (int)jsvGetStringLength(parent))
-   match = jsvCompareString(parent, searchStr, (size_t)position,0,true)==0;
+   match = jsvCompareString(parent, searchStr, (size_t)position,0,false,true)==0;
   jsvUnLock(searchStr);
   return match;
 }
@@ -835,7 +858,7 @@ bool jswrap_string_endsWith(JsVar *parent, JsVar *search, JsVar *length) {
   bool match = false;
   if (position >= 0 &&
       (int)jsvGetStringLength(searchStr)+position <= (int)jsvGetStringLength(parent))
-    match = jsvCompareString(parent, searchStr, (size_t)position,0,true)==0;
+    match = jsvCompareString(parent, searchStr, (size_t)position,0,false,false)==0;
   jsvUnLock(searchStr);
   return match;
 }
@@ -931,7 +954,7 @@ JsVar *jswrap_string_padX(JsVar *str, int targetLength, JsVar *padString, bool p
 
   padString = padString ? jsvAsString(padString) : jsvNewFromString(" ");
   int padLength = (int)jsvGetStringLength(padString);
-  while (padChars > 0) {
+  while (padChars > 0 && padLength > 0) {
     jsvAppendStringVar(result, padString, 0, (size_t)((padLength > padChars) ? padChars : padLength));
     padChars -= padLength;
   }

@@ -69,22 +69,6 @@ JsVar *jswrap_spi_constructor() {
   return jspNewObject(0,"SPI");
 }
 
-/*JSON{
-  "type" : "staticmethod",
-  "class" : "SPI",
-  "name" : "find",
-  "deprecated" : true,
-  "ifndef" : "SAVE_ON_FLASH",
-  "generate_full" : "jshGetDeviceObjectFor(JSH_SPI1, JSH_SPIMAX, pin)",
-  "params" : [
-    ["pin","pin","A pin to search with"]
-  ],
-  "return" : ["JsVar","An object of type `SPI`, or `undefined` if one couldn't be found."]
-}
-Try and find an SPI hardware device that will work on this pin (e.g. `SPI1`)
-
-May return undefined if no device can be found.
-*/
 
 /*JSON{
   "type" : "method",
@@ -121,7 +105,7 @@ those based on `nRF52` chips can have SPI on any pins, so don't have specific
 markings.
 
 The SPI `mode` is between 0 and 3 - see
-http://en.wikipedia.org/wiki/Serial_Peripheral_Interface_Bus#Clock_polarity_and_phase
+https://en.wikipedia.org/wiki/Serial_Peripheral_Interface#Mode_numbers
 
 On STM32F1-based parts, you cannot mix AF and non-AF pins (SPI pins are usually
 grouped on the chip - and you can't mix pins from two groups). Espruino will not
@@ -378,6 +362,8 @@ useful for faking one-wire style protocols
 Sending multiple bytes in one call to send is preferable as they can then be
 transmitted end to end. Using multiple calls to send() will result in
 significantly slower transmission speeds.
+
+**Note:** This is deprecated. The main use of this was neopixels on STM32, and for that `require("neopixel").write(B15, leds);` is much cleaner.
  */
 void jswrap_spi_send4bit(JsVar *parent, JsVar *srcdata, int bit0, int bit1, Pin nss_pin) {
   if (!jsvIsObject(parent)) return;
@@ -451,6 +437,8 @@ useful for faking one-wire style protocols
 Sending multiple bytes in one call to send is preferable as they can then be
 transmitted end to end. Using multiple calls to send() will result in
 significantly slower transmission speeds.
+
+**Note:** This is deprecated. You can get a similar result using `tmp=new Uint8Array(data.length*8);E.mapInPlace(data,tmp,[bit0,bit1],1);spi.write(tmp);`
  */
 void jswrap_spi_send8bit(JsVar *parent, JsVar *srcdata, int bit0, int bit1, Pin nss_pin) {
   if (!jsvIsObject(parent)) return;
@@ -529,23 +517,6 @@ Use `I2C.setup` to configure this port.
 JsVar *jswrap_i2c_constructor() {
   return jspNewObject(0,"I2C");
 }
-
-/*JSON{
-  "type" : "staticmethod",
-  "class" : "I2C",
-  "name" : "find",
-  "deprecated" : true,
-  "ifndef" : "SAVE_ON_FLASH",
-  "generate_full" : "jshGetDeviceObjectFor(JSH_I2C1, JSH_I2CMAX, pin)",
-  "params" : [
-    ["pin","pin","A pin to search with"]
-  ],
-  "return" : ["JsVar","An object of type `I2C`, or `undefined` if one couldn't be found."]
-}
-Try and find an I2C hardware device that will work on this pin (e.g. `I2C1`)
-
-May return undefined if no device can be found.
-*/
 
 /*JSON{
   "type" : "object",
@@ -660,7 +631,8 @@ void _jswrap_i2c_writeTo(JsVar *parent, IOEventFlags device, int address, bool s
       inf.started = jsvObjectGetBoolChild(parent, "started");
       jsi2cWrite(&inf, (unsigned char)address, (int)dataLen, (unsigned char*)dataPtr, sendStop);
     }
-    jsvUnLock2(jsvObjectSetChild(parent, "started", jsvNewFromBool(inf.started)), options);
+    jsvObjectSetBoolChild(parent, "started", inf.started);
+    jsvUnLock(options);
 #endif
   }
 }
@@ -712,7 +684,8 @@ JsVar *_jswrap_i2c_readFrom(JsVar *parent, IOEventFlags device, int address,  bo
       inf.started = jsvObjectGetBoolChild(parent, "started");
       jsi2cRead(&inf, (unsigned char)address, nBytes, buf, sendStop);
     }
-    jsvUnLock2(jsvObjectSetChild(parent, "started", jsvNewFromBool(inf.started)), options);
+    jsvObjectSetBoolChild(parent, "started", inf.started);
+    jsvUnLock(options);
 #endif
   } else return 0;
 
@@ -767,8 +740,7 @@ I2C.readReg = function(address, reg, quantity) {
 JsVar *jswrap_i2c_readReg(JsVar *parent, int address, int reg, int nBytes) {
   if (!jsvIsObject(parent)) return 0;
   IOEventFlags device = jsiGetDeviceFromClass(parent);
-  bool sendStop = false;
   unsigned char i2cReg = (unsigned char)reg;
-  _jswrap_i2c_writeTo(parent, device, address, sendStop, 1, &i2cReg);
-  return _jswrap_i2c_readFrom(parent, device, address, sendStop, nBytes);
+  _jswrap_i2c_writeTo(parent, device, address, false /* Don't send STOP */, 1, &i2cReg);
+  return _jswrap_i2c_readFrom(parent, device, address, true /* Send STOP after reading */, nBytes);
 }

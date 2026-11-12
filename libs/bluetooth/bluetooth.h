@@ -24,10 +24,13 @@
 #if NRF_SD_BLE_API_VERSION>5
 #include "nrf_sdh_ble.h"
 #define BLE_GAP_ADV_MAX_SIZE BLE_GAP_ADV_SET_DATA_SIZE_MAX
-#else
+#ifndef ESPR_MAX_ADVERTISEMENT_DATA // on new softdevice extended advertising allows us to advertise more data
+#define ESPR_MAX_ADVERTISEMENT_DATA  (63) // must be >=BLE_GAP_ADV_SET_DATA_SIZE_MAX (31)
+#endif // ESPR_MAX_ADVERTISEMENT_DATA
+#else // NRF_SD_BLE_API_VERSION<=5
 #include "ble.h"
+#define ESPR_MAX_ADVERTISEMENT_DATA  BLE_GAP_ADV_MAX_SIZE // on older SDKs we don't get extended advertising
 #endif
-#include "ble_advdata.h"
 
 /* Check for errors when in an IRQ, when we're pretty sure an error won't
  * cause a hard reset. Error is then reported outside of the IRQ without
@@ -46,30 +49,43 @@ typedef struct {
   uint8_t addr[6];
 } ble_gap_addr_t;
 #define BLE_GATT_HANDLE_INVALID (0)
+#define BLE_CONN_HANDLE_INVALID (0xFFFF)
 #define BLE_GAP_ADDR_TYPE_PUBLIC (0)
 #define BLE_GAP_ADDR_TYPE_RANDOM_STATIC (1)
 #define BLE_GAP_ADDR_TYPE_RANDOM_PRIVATE_RESOLVABLE (2)
 #define BLE_GAP_ADDR_TYPE_RANDOM_PRIVATE_NON_RESOLVABLE (3)
 #define BLE_GAP_ADV_MAX_SIZE (31)
+#define ESPR_MAX_ADVERTISEMENT_DATA  BLE_GAP_ADV_MAX_SIZE
+#define BLE_GAP_AD_TYPE_FLAGS 0x01
 #define BLE_GAP_AD_TYPE_16BIT_SERVICE_UUID_MORE_AVAILABLE   0x02
 #define BLE_GAP_AD_TYPE_16BIT_SERVICE_UUID_COMPLETE         0x03
 #define BLE_GAP_AD_TYPE_128BIT_SERVICE_UUID_MORE_AVAILABLE  0x06
 #define BLE_GAP_AD_TYPE_128BIT_SERVICE_UUID_COMPLETE        0x07
-#define BLE_GAP_AD_TYPE_SERVICE_DATA                        0x16
-#define BLE_GAP_AD_TYPE_SERVICE_DATA_128BIT_UUID            0x21
 #define BLE_GAP_AD_TYPE_SHORT_LOCAL_NAME                    0x08
 #define BLE_GAP_AD_TYPE_COMPLETE_LOCAL_NAME                 0x09
+#define BLE_GAP_AD_TYPE_SERVICE_DATA                        0x16
+#define BLE_GAP_AD_TYPE_SERVICE_DATA_128BIT_UUID            0x21
+#define BLE_GAP_AD_TYPE_SOLICITED_SERVICE_UUIDS_16BIT       0x14
 #define BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA          0xFF
+#define BLE_GAP_ADV_FLAGS_LE_ONLY_LIMITED_DISC_MODE   0x05
+#define BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE   0x06
 #define BLE_UUID_TYPE_UNKNOWN (0)
 #define BLE_UUID_TYPE_BLE (1)
 #define BLE_UUID_TYPE_128 2
-#define MSEC_TO_UNITS(MS,MEH) MS
+#define UNIT_0_625_MS 625 // for MSEC_TO_UNITS
+#define UNIT_1_25_MS 1250 // for MSEC_TO_UNITS
+#define MSEC_TO_UNITS(MS,UNITS) (((MS)*1000)/(UNITS))
 #define GATT_MTU_SIZE_DEFAULT 23
 #define BLE_NUS_MAX_DATA_LEN 20 //GATT_MTU_SIZE_DEFAULT - 3
 #define BLE_CCCD_VALUE_LEN 2
 #define BLE_GATT_HVX_NOTIFICATION 1 // flag in CCCD
 #define BLE_GATT_HVX_INDICATION 2 // flag in CCCD
+#define BLE_UUID_HUMAN_INTERFACE_DEVICE_SERVICE                  0x1812
 #endif //!NRF5X (fudge NRF5X API for ESP32)
+
+#ifdef ESP32
+#define ESP_GATT_MTU_SIZE (IOEVENT_MAX_LEN-3) // most we're expecting to put in our BLE queue
+#endif
 
 #ifndef CENTRAL_LINK_COUNT /**<number of central links used by the application. When changing this number remember to adjust the RAM settings*/
 #if defined(NRF52_SERIES) || defined(ESP32) // nRF52 gets the ability to connect to other devices
@@ -102,6 +118,8 @@ typedef struct {
 #ifndef BLUETOOTH_ADVERTISING_INTERVAL
 #define BLUETOOTH_ADVERTISING_INTERVAL 375
 #endif
+
+#define ADVERTISE_MAX_UUIDS             4 ///< maximum custom UUIDs to advertise
 
 typedef enum  {
   BLE_NONE = 0,
@@ -159,6 +177,13 @@ typedef enum {
   BLEP_RESTART_SOFTDEVICE,          //< Perform a softdevice restart (again, we don't want to do this in an IRQ!)
   BLEP_RSSI_PERIPH,                 //< RSSI data from peripheral connection (rssi as data)
   BLEP_ADV_REPORT,                  //< Advertising received (as buffer)
+#if (NRF_SD_BLE_API_VERSION >= 5)
+  BLEP_PHY_UPDATE_REQUEST,          //< PHY update request (connection handle as data, [tx_phy,rx_phy] as buffer)
+  BLEP_PHY_UPDATE,                  //< PHY update finished (connection handle as data, [tx_phy,rx_phy,status] as buffer)
+#endif
+#ifndef SAVE_ON_FLASH
+  BLEP_MTU_UPDATE,                  //< MTU update finished (connection handle as data, [mtu_16bit] as buffer)
+#endif
 #if CENTRAL_LINK_COUNT>0
   BLEP_RSSI_CENTRAL,                //< RSSI data from central connection (rssi as data low byte, index in m_central_conn_handles as high byte )
   BLEP_TASK_FAIL,                   //< Task failed because unknown
@@ -207,28 +232,18 @@ typedef enum {
 #endif
 } BLEPending;
 
-
-extern volatile BLEStatus bleStatus;
-/// Filter to use when discovering BLE Services/Characteristics
-extern ble_uuid_t bleUUIDFilter;
-
-/// The advertising interval (in units of 0.625 ms)
-extern uint16_t bleAdvertisingInterval;
-/// The interval for the current peripheral connection (in units of 1.25 ms)
-extern uint16_t blePeriphConnectionInterval;
-
-extern volatile uint16_t                         m_peripheral_conn_handle;    /**< Handle of the current connection. */
-#if CENTRAL_LINK_COUNT>0
-extern volatile uint16_t                         m_central_conn_handles[CENTRAL_LINK_COUNT]; /**< Handle for central mode connection */
-#endif
+/// amount to shift the connection index for the 16 bit 'data' field in jsble_queue_pending_buf(BLEP_CENTRAL_NOTIFICATION, ...
+#define BLEP_CENTRAL_NOTIFICATION_CONN_SHIFT (15)
+/// we need to mask off the handle (as we're using the top bits for the connection)
+#define BLEP_CENTRAL_NOTIFICATION_HANDLE_MASK (0x7FFF)
 
 
 /// for BLEP_ADV_REPORT
 typedef struct {
   ble_gap_addr_t            peer_addr;
   int8_t                    rssi;                  /**< Received Signal Strength Indication in dBm of the last packet received. */
-  uint8_t        dlen;                  /**< Advertising or scan response data length. */
-  uint8_t        data[BLE_GAP_ADV_MAX_SIZE];    /**< Advertising or scan response data. */
+  uint8_t                   dlen;                  /**< Advertising or scan response data length. */
+  uint8_t                   data[IOEVENT_MAX_LEN-10];    /**< Advertising or scan response data - ensure we can *just* fit it in our BLE buffer */
 } BLEAdvReportData;
 
 /** Initialise the BLE stack */
@@ -239,8 +254,8 @@ bool jsble_kill();
 /// Checks for error and reports an exception string if there was one, else 0 if no error
 JsVar *jsble_get_error_string(uint32_t err_code);
 
-/** Execute a task that was added by jsble_queue_pending - this is done outside of IRQ land. Returns number of events handled */
-int jsble_exec_pending(IOEvent *event);
+/** Execute a task that was added by jsble_queue_pending - this is done outside of IRQ land. Returns number of event bytes handled */
+int jsble_exec_pending(uint8_t *data, int dataLen);
 
 /** Stop and restart the softdevice so that we can update the services in it -
  * both user-defined as well as UART/HID. If jsFunction is a function it is
@@ -251,18 +266,6 @@ uint32_t jsble_advertising_start();
 uint32_t jsble_advertising_update_advdata(char *dPtr, unsigned int dLen);
 uint32_t jsble_advertising_update_scanresponse(char *dPtr, unsigned int dLen);
 void jsble_advertising_stop();
-
-/** Is BLE connected to any device at all? */
-bool jsble_has_connection();
-
-/** Is BLE connected to a central device at all? */
-bool jsble_has_central_connection();
-
-/** Return the index of the central connection in m_central_conn_handles, or -1 */
-int jsble_get_central_connection_idx(uint16_t handle);
-
-/** Is BLE connected to a server device at all (eg, the simple, 'slave' mode)? */
-bool jsble_has_peripheral_connection();
 
 /** Call this when something happens on BLE with this as
  * a peripheral - used with Dynamic Interval Adjustment  */
@@ -311,11 +314,6 @@ void jsble_set_tx_power(int8_t pwr);
 
 
 // ------------------------------------------------- lower-level utility fns
-
-#ifdef NRF5X
-/// Build advertising data struct to pass into @ref ble_advertising_init.
-void jsble_setup_advdata(ble_advdata_t *advdata);
-#endif
 
 #ifdef USE_NFC
 
@@ -391,11 +389,13 @@ uint32_t jsble_set_central_rssi_scan(uint16_t central_conn_handle, bool enabled)
 /// Send a passkey if one was requested (passkey = 6 bytes long)
 uint32_t jsble_central_send_passkey(uint16_t central_conn_handle, char *passkey);
 #endif
+#if PEER_MANAGER_ENABLED || defined(ESP32)
+/// Erase any saved bonding info for peers (if hard=true, the underlying flash pages are deleted rather than just asking the peer manager. Needs a restart after)
+void jsble_central_eraseBonds(bool hard);
+#endif
 #if PEER_MANAGER_ENABLED
 /// Set whether or not the whitelist is enabled
 void jsble_central_setWhitelist(bool whitelist);
-/// Erase any saved bonding info for peers
-void jsble_central_eraseBonds();
 /// Try to resolve a bonded peer's address from a random private resolvable address
 JsVar *jsble_resolveAddress(JsVar *address);
 #ifdef ESPR_BLE_PRIVATE_ADDRESS_SUPPORT

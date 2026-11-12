@@ -26,9 +26,11 @@ void jsspiDumpSPIInfo(JshSPIInfo *inf) {
 
 void jsspiHardwareFunc(unsigned char *tx, unsigned char *rx, unsigned int len, spi_sender_data *info) {
   IOEventFlags device = *(IOEventFlags*)info;
+  jshSPISetReceive(device, rx!=NULL); // ensure we set if we want to receive or not, fix #2613
   jshSPISendMany(device, tx, rx, len, NULL/*no callback - sync*/);
 }
 
+// TODO: We could go even faster than this using jshGetPinAddress
 void jsspiFastSoftwareFunc(
   unsigned char *tx, unsigned char *rx, unsigned int len,
 	spi_sender_data *info

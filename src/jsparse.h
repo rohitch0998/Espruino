@@ -39,6 +39,7 @@ JsVar *jspNewBuiltin(const char *name);
 
 /// Create a new Class of the given instance and return its prototype (as a name 'prototype')
 NO_INLINE JsVar *jspNewPrototype(const char *instanceOf, bool returnObject);
+void jspEnsureIsPrototype(JsVar *instanceOf, JsVar *prototypeName);
 
 /** Create a new object of the given instance and add it to root with name 'name'.
  * If name!=0, added to root with name, and the name is returned
@@ -52,19 +53,20 @@ void jspSetInterrupted(bool interrupt);
 /// Has there been an error during parsing
 bool jspHasError();
 /// Set the error flag - set lineReported if we've already output the line number
-void jspSetError(bool lineReported);
+void jspSetError();
 /// We had an exception (argument is the exception's value)
 void jspSetException(JsVar *value);
 /** Return the reported exception if there was one (and clear it). May return undefined even if there was an exception - eg `throw undefined` */
 JsVar *jspGetException();
 /** Return a stack trace string if there was one (and clear it) */
 JsVar *jspGetStackTrace();
+/** Append a line marker for the current lex instanec to the given string */
+void jspAppendStackTrace(JsVar *stackTrace, JsLex *lex);
 
 /** Evaluate the given variable as an expression (in current scope) */
 JsVar *jspEvaluateExpressionVar(JsVar *str);
-/** Execute code form a variable and return the result. If lineNumberOffset
- * is nonzero it's added to the line numbers that get reported for errors/debug */
-JsVar *jspEvaluateVar(JsVar *str, JsVar *scope, uint16_t lineNumberOffset);
+/** Execute code form a variable and return the result */
+JsVar *jspEvaluateVar(JsVar *str, JsVar *scope, const char *stackTraceName);
 /** Execute code form a string and return the result.
  * You should only set stringIsStatic if the string will hang around for
  * the life of the interpreter, as then the interpreter will use a pointer
@@ -97,7 +99,7 @@ typedef enum  {
   EXEC_INTERRUPTED = 16, ///< true if execution has been interrupted
   EXEC_EXCEPTION = 32, ///< we had an exception, so don't execute until we hit a try/catch block
   EXEC_ERROR = 64,
-  EXEC_ERROR_LINE_REPORTED = 128, ///< if an error has been reported, set this so we don't do it too much (EXEC_ERROR will STILL be set)
+  EXEC_RUN_INTERRUPT_JS = 128, ///< when set, we should stop our execution to run some JavaScript code (used for immediate timers)
 
   EXEC_FOR_INIT = 256, ///< when in for initialiser parsing - hack to avoid getting confused about multiple use for IN
   EXEC_IN_LOOP = 512, ///< when in a loop, set this - we can then block break/continue outside it
@@ -128,7 +130,7 @@ typedef enum  {
   EXEC_NO_PARSE_MASK = EXEC_INTERRUPTED|EXEC_ERROR, ///< in these cases we should exit as fast as possible - skipping out of parsing
   EXEC_SAVE_RESTORE_MASK = EXEC_YES|EXEC_BREAK|EXEC_CONTINUE|EXEC_RETURN|EXEC_IN_LOOP|EXEC_IN_SWITCH|EXEC_ERROR_MASK, ///< the things JSP_SAVE/RESTORE_EXECUTE should keep track of
   EXEC_CTRL_C_MASK = EXEC_CTRL_C | EXEC_CTRL_C_WAIT, ///< Ctrl-C was pressed at some point
-  EXEC_PERSIST = EXEC_ERROR_MASK|EXEC_CTRL_C_MASK, ///< Things we should keep track of even after executing
+  EXEC_PERSIST = EXEC_ERROR_MASK|EXEC_CTRL_C_MASK|EXEC_RUN_INTERRUPT_JS, ///< Things we should keep track of even after executing
 } JsExecFlags;
 
 /** This structure is used when parsing the JavaScript. It contains
@@ -194,7 +196,7 @@ JsVar *jspParse();
 JsVar *jspeFunctionCall(JsVar *function, JsVar *functionName, JsVar *thisArg, bool isParsing, int argCount, JsVar **argPtr);
 
 
-// Find a variable (or built-in function) based on the current scopes
+// Find a variable (or built-in function) based on the current scopes. Returns a NAME
 JsVar *jspGetNamedVariable(const char *tokenName);
 
 /** Get the named function/variable on the object - whether it's built in, or predefined.

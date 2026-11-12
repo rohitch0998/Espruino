@@ -171,7 +171,7 @@ void jshKickSoftWatchDog();
 bool jshGetWatchedPinState(IOEventFlags device);
 
 /// Given an event, check the EXTI flags and see if it was for the given pin
-bool jshIsEventForPin(IOEvent *event, Pin pin);
+bool jshIsEventForPin(IOEventFlags eventFlags, Pin pin);
 
 /** Is the given device initialised?
  * eg. has jshUSARTSetup/jshI2CSetup/jshSPISetup been called previously? */
@@ -338,12 +338,23 @@ size_t jshFlashGetMemMapAddress(size_t ptr);
 
 /// Start the timer and get it to interrupt once after 'period' (i.e. it should not auto-reload)
 void jshUtilTimerStart(JsSysTime period);
-/// Reschedule the timer (it should already be running) to interrupt after 'period'
+/** Reschedule the timer (it should already be running) to interrupt after 'period'.
+With the timer running this should ideally set the time period from the last time the
+timer triggered (so as to factor out any execution delay in jstUtilTimerInterruptHandler).  */
 void jshUtilTimerReschedule(JsSysTime period);
 /// Stop the timer
 void jshUtilTimerDisable();
 
 // ---------------------------------------------- LOW LEVEL
+
+typedef struct {
+  volatile uint32_t *in_addr; // address to read to
+  volatile uint32_t *set_addr; // address to write to set
+  volatile uint32_t *clr_addr; // address to write to clear
+  uint32_t mask; // value to write
+} JshGetPinAddressResult;
+// Get the addresses to read/write to in order to change the state of this pin. Return true if ALL addressed set, false if not
+bool jshGetPinAddress(Pin pin, JshGetPinAddressResult *result);
 
 #ifdef ARM
 // On SYSTick interrupt, call this
@@ -353,13 +364,6 @@ void jshDoSysTick();
 #if defined(STM32) || defined(STM32_LL)
 // push a byte into SPI buffers (called from IRQ)
 void jshSPIPush(IOEventFlags device, uint16_t data);
-
-typedef enum {
-  JSGPAF_INPUT,
-  JSGPAF_OUTPUT,
-} JshGetPinAddressFlags;
-// Get the address to read/write to in order to change the state of this pin. Or 0.
-volatile uint32_t *jshGetPinAddress(Pin pin, JshGetPinAddressFlags flags);
 
 /// Set the prescaler used for the RTC - can be used for course RTC adjustment
 void jshSetupRTCPrescalerValue(unsigned int prescale);
@@ -386,6 +390,8 @@ JsVarFloat jshReadTemperature();
 
 /// The voltage that a reading of 1 from `analogRead` actually represents, in volts
 JsVarFloat jshReadVRef();
+/// On nRF52833/40 this is the VDDH value (before the internal voltage regulator)
+JsVarFloat jshReadVDDH();
 
 /** Get a random number - either using special purpose hardware or by
  * reading noise from an analog input. If unimplemented, this should

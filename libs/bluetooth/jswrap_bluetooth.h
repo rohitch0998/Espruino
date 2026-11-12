@@ -69,6 +69,8 @@ void bleSwitchTask(BleTask task);
 void bleSetActiveBluetoothGattServer(int idx, JsVar *var);
 // Get the currently active GATT server based on the index in m_central_conn_handles (the return value needs unlocking)
 JsVar *bleGetActiveBluetoothGattServer(int idx);
+// Get the currently active BluetoothDevice based on the index in m_central_conn_handles (the return value needs unlocking)
+JsVar *bleGetActiveBluetoothDevice(int idx);
 
 uint16_t jswrap_ble_BluetoothRemoteGATTServer_getHandle(JsVar *parent);
 uint16_t jswrap_ble_BluetoothDevice_getHandle(JsVar *parent);
@@ -91,9 +93,11 @@ void jswrap_ble_disconnect();
 void jswrap_ble_sleep();
 void jswrap_ble_wake();
 void jswrap_ble_restart(JsVar *callback);
-void jswrap_ble_eraseBonds();
+void jswrap_ble_eraseBonds(bool hard);
+void jswrap_ble_getAddress_binary(uint32_t *result, bool current);
 JsVar *jswrap_ble_getAddress(bool current);
 void jswrap_ble_setAddress(JsVar *address);
+JsVar *jswrap_ble_getAdvertisingName();
 JsVar *jswrap_ble_resolveAddress(JsVar *address);
 
 /// Used by bluetooth.c internally when it needs to set up advertising at first
@@ -101,8 +105,14 @@ JsVar *jswrap_ble_getCurrentAdvertisingData();
 
 JsVarFloat jswrap_ble_getBattery();
 void jswrap_ble_setAdvertising(JsVar *data, JsVar *options);
+size_t _jswrap_ble_getAdvertisingDataRaw(uint8_t *advdata, JsVar *data, JsVar *options, bool isForSetAdvertising);
+JsVar *_jswrap_ble_getAdvertisingData(JsVar *data, JsVar *options, bool isForSetAdvertising);
 JsVar *jswrap_ble_getAdvertisingData(JsVar *data, JsVar *options);
+
 void jswrap_ble_setScanResponse(JsVar *data);
+/// Get scan response (returns the length). data must be ESPR_MAX_ADVERTISEMENT_DATA long
+size_t _jswrap_ble_getScanResponse(uint8_t *advdata);
+
 void jswrap_ble_setServices(JsVar *data, JsVar *options);
 void jswrap_ble_updateServices(JsVar *data);
 void jswrap_ble_setScan(JsVar *callback, JsVar *options);
@@ -111,6 +121,7 @@ void jswrap_ble_findDevices(JsVar *callback, JsVar *options);
 void jswrap_ble_setRSSIHandler(JsVar *callback);
 void jswrap_ble_setTxPower(JsVarInt pwr);
 void jswrap_ble_setLowPowerConnection(bool lowPower);
+void jswrap_ble_updateConnection(JsVar *options);
 
 void jswrap_nfc_URL(JsVar *url);
 void jswrap_nfc_pair(JsVar *key);
@@ -158,5 +169,7 @@ JsVar *jswrap_ble_BluetoothRemoteGATTCharacteristic_writeValue(JsVar *characteri
 JsVar *jswrap_ble_BluetoothRemoteGATTCharacteristic_readValue(JsVar *characteristic);
 JsVar *jswrap_ble_BluetoothRemoteGATTCharacteristic_startNotifications(JsVar *characteristic);
 JsVar *jswrap_ble_BluetoothRemoteGATTCharacteristic_stopNotifications(JsVar *characteristic);
+void jswrap_BluetoothRemoteGATTServer_updateConnection(JsVar *parent, JsVar *options);
+
 
 void jswrap_ble_powerusage(JsVar *devices);

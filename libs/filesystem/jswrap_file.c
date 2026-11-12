@@ -19,7 +19,7 @@
 
 #define JS_FS_DATA_NAME JS_HIDDEN_CHAR_STR"FSd" // the data in each file
 #define JS_FS_OPEN_FILES_NAME "FSopen" // the list of open files
-#if !defined(LINUX) && !defined(USE_FILESYSTEM_SDIO) && !defined(USE_FLASHFS)
+#if !defined(LINUX) && !defined(USE_FILESYSTEM_SDIO)
 #define SD_CARD_ANYWHERE
 #endif
 
@@ -34,16 +34,18 @@ void sdSPISetup(JsVar *spi, Pin csPin);
 bool isSdSPISetup();
 #endif
 
-#ifdef USE_FLASHFS
-#include "flash_diskio.h"
-#endif
-
 // 'path' must be of JS_DIR_BUF_SIZE
 bool jsfsGetPathString(char *pathStr, JsVar *path) {
   if (jsvGetString(path, pathStr, JS_DIR_BUF_SIZE)==JS_DIR_BUF_SIZE) {
     jsExceptionHere(JSET_ERROR, "File path too long");
     return false;
   }
+#ifdef ESPR_FS_PREPEND_PATH
+  char buf[JS_DIR_BUF_SIZE];
+  strcpy(buf, ESPR_FS_PREPEND_PATH);
+  strcat(buf, pathStr);
+  strcpy(pathStr, buf);
+#endif
   return true;
 }
 
@@ -79,7 +81,6 @@ bool jsfsInit() {
 #endif
 #ifndef LINUX
   if (!fat_initialised) {
-#ifndef USE_FLASHFS
 #ifdef SD_CARD_ANYWHERE
     if (!isSdSPISetup()) {
 #ifdef SD_SPI
@@ -100,7 +101,6 @@ bool jsfsInit() {
 #endif // SD_SPI
     }
 #endif // SD_CARD_ANYWHER
-#endif // USE_FLASHFS
     FRESULT res;
 
     if ((res = f_mount(&jsfsFAT, "", 1/*immediate mount*/)) != FR_OK) {
@@ -196,6 +196,7 @@ static bool fileGetFromVar(JsFile *file, JsVar *parent) {
   if (fHandle && jsvIsFlatString(fHandle)) {
     file->data = (JsFileData*)jsvGetFlatStringPointer(fHandle);
     file->fileVar = parent;
+    file->dataVar = fHandle;
     if(file->data->state == FS_OPEN) {// return false if the file has been closed.
       ret = true;
     }
@@ -254,18 +255,22 @@ void jswrap_E_unmountSD() {
   jswrap_file_kill();
 }
 
-static bool allocateJsFile(JsFile* file,FileMode mode, FileType type) {
+static bool allocateJsFile(JsFile* file, FileMode mode, FileType type) {
   JsVar *parent = jspNewObject(0, "File");
   if (!parent) return false; // low memory
 
-  JsVar *data = jsvNewFlatStringOfLength(sizeof(JsFileData));
-  if (!data) { // out of memory for flat string
+  file->dataVar = jsvNewFlatStringOfLength(sizeof(JsFileData));
+  if (!file->dataVar) { // out of memory for flat string
+    jsvDefragment(); // defrag and try again in case it was a memory fragmentation issue
+    file->dataVar = jsvNewFlatStringOfLength(sizeof(JsFileData));
+  }
+  if (!file->dataVar) { // out of memory for flat string
     jsErrorFlags |= JSERR_LOW_MEMORY; // flag this up as an issue
     jsvUnLock(parent);
     return false;
   }
-  file->data = (JsFileData*)jsvGetFlatStringPointer(data);
-  jsvObjectSetChildAndUnLock(parent, JS_FS_DATA_NAME, data);
+  file->data = (JsFileData*)jsvGetFlatStringPointer(file->dataVar);
+  jsvObjectSetChild(parent, JS_FS_DATA_NAME, file->dataVar); // intentionally leave dataVar locked so it can't be moved by defrag
   file->fileVar = parent;
   assert(file->data);
   file->data->mode = mode;
@@ -281,7 +286,7 @@ static bool allocateJsFile(JsFile* file,FileMode mode, FileType type) {
   "generate" : "jswrap_E_openFile",
   "params" : [
     ["path","JsVar","the path to the file to open."],
-    ["mode","JsVar","The mode to use when opening the file. Valid values for mode are 'r' for read, 'w' for write new, 'w+' for write existing, and 'a' for append. If not specified, the default is 'r'."]
+    ["mode","JsVar","The mode to use when opening the file. Valid values for mode are 'r' for read, 'r+' for read+write (2v27+), 'w' for write new, 'w+' for write existing, and 'a' for append. If not specified, the default is 'r'."]
   ],
   "return" : ["JsVar","A File object"],
   "return_object" : "File"
@@ -319,11 +324,16 @@ JsVar *jswrap_E_openFile(JsVar* path, JsVar* mode) {
 #ifndef LINUX
         ff_mode = FA_READ | FA_OPEN_EXISTING;
 #endif
+      } else if(strcmp(modeStr,"r+") == 0) {
+        fMode = FM_READ_WRITE;
+      #ifndef LINUX
+        ff_mode = FA_READ | FA_WRITE | FA_OPEN_EXISTING;
+      #endif
       } else if(strcmp(modeStr,"a") == 0) {
         fMode = FM_WRITE;
 #ifndef LINUX
         ff_mode = FA_WRITE | FA_OPEN_ALWAYS;
-        append = true;
+        append = true; // FA_OPEN_APPEND only appeared in newer FatFS
 #endif
       } else if(strcmp(modeStr,"w") == 0) {
         fMode = FM_WRITE;
@@ -333,7 +343,7 @@ JsVar *jswrap_E_openFile(JsVar* path, JsVar* mode) {
       } else if(strcmp(modeStr,"w+") == 0) {
         fMode = FM_READ_WRITE;
 #ifndef LINUX
-        ff_mode = FA_WRITE | FA_OPEN_ALWAYS;
+        ff_mode = FA_READ | FA_WRITE | FA_OPEN_ALWAYS;
 #endif
       }
       if(fMode != FM_NONE && allocateJsFile(&file, fMode, FT_FILE)) {
@@ -350,8 +360,9 @@ JsVar *jswrap_E_openFile(JsVar* path, JsVar* mode) {
           jsvArrayPush(arr, file.fileVar);
         } else {
           // File open failed
-          jsvUnLock(file.fileVar);
+          jsvUnLock2(file.fileVar, file.dataVar);
           file.fileVar = 0;
+          file.dataVar = 0;
         }
 
         if(res != FR_OK)
@@ -393,8 +404,10 @@ void jswrap_file_close(JsVar* parent) {
       JsVar *arr = fsGetArray(false);
       if (arr) {
         JsVar *idx = jsvGetIndexOf(arr, file.fileVar, true);
-        if (idx)
+        if (idx) {
+          jsvUnLock(file.dataVar);
           jsvRemoveChildAndUnLock(arr, idx);
+        }
         jsvUnLock(arr);
       }
     }
@@ -565,7 +578,7 @@ Skip the specified number of bytes forward in the file
   "name" : "seek",
   "generate_full" : "jswrap_file_skip_or_seek(parent,nBytes,false)",
   "params" : [
-    ["nBytes","int32","is an integer specifying the number of bytes to skip forwards."]
+    ["nBytes","int32","is an integer specifying the byte position in the file to move to."]
   ]
 }
 Seek to a certain position in the file
@@ -609,81 +622,3 @@ void jswrap_file_skip_or_seek(JsVar* parent, int nBytes, bool is_skip) {
 Pipe this file to a stream (an object with a 'write' method)
 */
 
-#ifdef USE_FLASHFS
-
-/*JSON{
-  "type" : "staticmethod",
-  "class" : "E",
-  "name" : "flashFatFS",
-  "generate" : "jswrap_E_flashFatFS",
-  "ifdef" : "USE_FLASHFS",
-   "params" : [
-    ["options","JsVar",["[optional] An object `{ addr : int=0x300000, sectors : int=256, format : bool=false }`","addr : start address in flash","sectors: number of sectors to use","format:  Format the media"]]
-  ],
-  "return" : ["bool","True on success, or false on failure"]
-}
-Change the parameters used for the flash filesystem. The default address is the
-last 1Mb of 4Mb Flash, 0x300000, with total size of 1Mb.
-
-Before first use the media needs to be formatted.
-
-```
-fs=require("fs");
-try {
-  fs.readdirSync();
- } catch (e) { //'Uncaught Error: Unable to mount media : NO_FILESYSTEM'
-  console.log('Formatting FS - only need to do once');
-  E.flashFatFS({ format: true });
-}
-fs.writeFileSync("bang.txt", "This is the way the world ends\nnot with a bang but a whimper.\n");
-fs.readdirSync();
-```
-
-This will create a drive of 100 * 4096 bytes at 0x300000. Be careful with the
-selection of flash addresses as you can overwrite firmware! You only need to
-format once, as each will erase the content.
-
-`E.flashFatFS({ addr:0x300000,sectors:100,format:true });`
-*/
-
-int jswrap_E_flashFatFS(JsVar* options) {
-  uint32_t addr = FS_FLASH_BASE;
-  uint16_t sectors = FS_SECTOR_COUNT;
-  uint8_t format = 0;
-  if (jsvIsObject(options)) {
-    JsVar *a = jsvObjectGetChildIfExists(options, "addr");
-    if (a) {
-      if (jsvIsNumeric(a) && jsvGetInteger(a)>0x100000)
-        addr = (uint32_t)jsvGetInteger(a);
-    }
-    JsVar *s = jsvObjectGetChildIfExists(options, "sectors");
-    if (s) {
-      if (jsvIsNumeric(s) && jsvGetInteger(s)>0)
-        sectors = (uint16_t)jsvGetInteger(s);
-    }
-    JsVar *f = jsvObjectGetChildIfExists(options, "format");
-    if (f) {
-      if (jsvIsBoolean(f))
-        format = jsvGetBool(f);
-    }
-  }
-  else if (!jsvIsUndefined(options)) {
-    jsExceptionHere(JSET_TYPEERROR, "'options' must be an object, or undefined");
-  }
-
-  uint8_t init=flashFatFsInit(addr, sectors);
-  if (init) {
-    if ( format ) {
-      uint8_t res = f_mount(&jsfsFAT, "", 0/*delayed mount?*/);
-      jsDebug(DBG_INFO,"Formatting Flash\n");
-      res = f_mkfs("", 1, 0);  // Super Floppy format, using all space (not partition table)
-      if (res != FR_OK) {
-        jsExceptionHere(JSET_INTERNALERROR, "Flash Formatting error:",res);
-        return false;
-     }
-   }
-  }
-  jsfsInit();
-  return true;
-}
-#endif

@@ -27,9 +27,9 @@
 #endif
 
 #ifndef BUILDNUMBER
-#define JS_VERSION "2v25"
+#define JS_VERSION "2v29"
 #else
-#define JS_VERSION "2v25." BUILDNUMBER
+#define JS_VERSION "2v29." BUILDNUMBER
 #endif
 /*
   In code:
@@ -43,7 +43,6 @@
 #define ESPR_NO_OBJECT_METHODS 1
 #define ESPR_NO_PROPERTY_SHORTHAND 1
 #define ESPR_NO_GET_SET 1
-#define ESPR_NO_LINE_NUMBERS 1
 #define ESPR_NO_LET_SCOPING 1
 #ifndef ESPR_NO_PROMISES
   #define ESPR_NO_PROMISES 1
@@ -339,7 +338,6 @@ typedef int64_t JsSysTime;
 #define JSPARSE_FUNCTION_SCOPE_NAME JS_HIDDEN_CHAR_STR"sco" // the scope of the function's definition
 #define JSPARSE_FUNCTION_THIS_NAME JS_HIDDEN_CHAR_STR"ths" // the 'this' variable - for bound functions
 #define JSPARSE_FUNCTION_NAME_NAME JS_HIDDEN_CHAR_STR"nam" // for named functions (a = function foo() { foo(); })
-#define JSPARSE_FUNCTION_LINENUMBER_NAME JS_HIDDEN_CHAR_STR"lin" // The line number offset of the function
 #define JS_EVENT_PREFIX "#on"
 #define JS_TIMEZONE_VAR "tz"
 #ifndef ESPR_NO_DAYLIGHT_SAVING
@@ -379,6 +377,9 @@ typedef int64_t JsSysTime;
 
 /// Put before functions that we always want inlined
 #if defined(__GNUC__) && !defined(__clang__)
+ #if defined(ZEPHYR)
+   #undef ALWAYS_INLINE // zephyr provides its own incompatible macro
+ #endif
  #if defined(LINK_TIME_OPTIMISATION) && !defined(SAVE_ON_FLASH) && !defined(DEBUG)
   #define ALWAYS_INLINE __attribute__ ((gnu_inline)) __attribute__((always_inline)) inline
  #else
@@ -432,8 +433,12 @@ typedef int64_t JsSysTime;
 #define NIBBLEFIELD_CLEAR(BITFIELD) memset(BITFIELD, 0, sizeof(BITFIELD)) ///< Clear all elements
 */
 
-#if defined(NRF51_SERIES)
-  // Cortex-M0 does not support unaligned reads
+#if defined(NRF51_SERIES) || defined(RP2040)
+  // Cortex-M0/M0+ does not support unaligned reads
+  #define ESPR_NO_UNALIGNED_READS 1
+#endif
+
+#ifdef ESPR_NO_UNALIGNED_READS
   #define UNALIGNED_UINT16(addr) ((((uint16_t)*((uint8_t*)(addr)+1)) << 8) | (*(uint8_t*)(addr)))
 #else
   #define UNALIGNED_UINT16(addr) (*(uint16_t*)addr)
@@ -634,10 +639,6 @@ void reverseBytes(char *data, int len);
 
 /** get the amount of free stack we have, in bytes */
 size_t jsuGetFreeStack();
-
-#ifdef ESP32
-  void *espruino_stackHighPtr;  //Used by jsuGetFreeStack
-#endif
 
 typedef struct {
   short x,y,z;

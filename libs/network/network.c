@@ -14,6 +14,7 @@
 #include "network.h"
 #include "jsparse.h"
 #include "jsinteractive.h"
+#include "socketerrors.h"
 #ifdef USE_FILESYSTEM
   #include "jswrap_functions.h"
   #include "jswrap_fs.h"
@@ -36,6 +37,7 @@
 #endif
 #if defined(USE_TLS)
   #include "mbedtls/ssl.h"
+  #include "mbedtls/debug.h"
   #include "mbedtls/ctr_drbg.h"
   #include "jswrap_crypto.h"
 #endif
@@ -53,9 +55,9 @@ JsNetworkState networkState =
 
 JsNetwork *networkCurrentStruct = 0;
 
-uint32_t networkParseIPAddress(const char *ip) {
+uint32_t networkParseIPv4Address(const char *ip) {
   if (!strcmp(ip,"localhost"))
-    return 0x0100007F; // 127.0.0.1
+    return networkParseIPv4Address("127.0.0.1");
 
   int n = 0;
   uint32_t addr = 0;
@@ -107,7 +109,7 @@ bool networkParseMACAddress(unsigned char *addr, const char *ip) {
  * To create a Mac address, one might use:
  * networkGetAddressAsString(mac, 6, 16, ':')
  */
-JsVar *networkGetAddressAsString(unsigned char *ip, int nBytes, unsigned int base, char separator) {
+JsVar *networkGetAddressAsString(const unsigned char *ip, int nBytes, unsigned int base, char separator) {
   char data[64] = "";
   int i = 0, dir = 1, l = 0;
   if (nBytes<0) {
@@ -178,7 +180,7 @@ void networkGetHostByName(
   *out_ip_addr = 0;
 
   // first try and simply parse the IP address as a string
-  *out_ip_addr = networkParseIPAddress(hostName);
+  *out_ip_addr = networkParseIPv4Address(hostName);
 
   // If we did not get an IP address from the string, then try and resolve it by
   // calling the network gethostbyname.
@@ -312,7 +314,7 @@ static void ssl_debug( void *ctx, int level,
 {
     ((void) ctx);
     ((void) level);
-    // jsiConsolePrintf( "%s:%d: %s", file, line, str );
+    // jsiConsolePrintf( "%s:%d: %s", file, line, str ); // str already contains newline
 }
 
 int ssl_send(void *ctx, const unsigned char *buf, size_t len) {
@@ -378,6 +380,10 @@ JsVar *load_cert_file(JsVar *cert) {
   }
 
   JSV_GET_AS_CHAR_ARRAY(pPtr, pLen, fileContents);
+  if (!pPtr) {
+    jsvUnLock(fileContents);
+    return 0; // already errored
+  }
   bool started = false;
   unsigned int i = 0;
   unsigned int j = 0;
@@ -432,6 +438,11 @@ JsVar *decode_certificate_var(JsVar *var) {
   return decoded;
 }
 
+static int dummy_rng(void *p_rng, unsigned char *out, size_t len) {
+    memset(out, 0, len);
+    return 0;
+}
+
 bool ssl_load_key(SSLSocketData *sd, JsVar *options) {
   JsVar *keyVar = jsvObjectGetChildIfExists(options, "key");
   if (!keyVar) {
@@ -443,7 +454,17 @@ bool ssl_load_key(SSLSocketData *sd, JsVar *options) {
   JsVar *buffer = decode_certificate_var(keyVar);
   JSV_GET_AS_CHAR_ARRAY(keyPtr, keyLen, buffer);
   if (keyLen && keyPtr) {
+#if defined(MBEDTLS_VERSION_NUMBER) && (MBEDTLS_VERSION_NUMBER >= 0x03000000)
+    ret = mbedtls_pk_parse_key(&sd->pkey,
+                           (const unsigned char *)keyPtr, keyLen,
+                           NULL, 0,
+                           dummy_rng, NULL);
+#else
     ret = mbedtls_pk_parse_key(&sd->pkey, (const unsigned char *)keyPtr, keyLen, NULL, 0 /*no password*/);
+#endif
+
+
+
   }
   jsvUnLock(buffer);
 
@@ -562,6 +583,7 @@ bool ssl_newSocketData(int sckt, JsVar *options) {
     return false;
   }
 
+  char hostname[64] = "mbed TLS Server 1";
   if (jsvIsObject(options)) {
     if (!ssl_load_cacert(sd, options) ||
         !ssl_load_owncert(sd, options) ||
@@ -569,6 +591,9 @@ bool ssl_newSocketData(int sckt, JsVar *options) {
       ssl_freeSocketData(sckt);
       return false;
     }
+    JsVar *v = jsvObjectGetChildIfExists(options, "host");
+    if (jsvIsString(v)) jsvGetString(v, hostname, sizeof(hostname));
+    jsvUnLock(v);
   }
 
   if (( ret = mbedtls_ssl_config_defaults( &sd->conf,
@@ -581,8 +606,11 @@ bool ssl_newSocketData(int sckt, JsVar *options) {
     ssl_freeSocketData(sckt);
     return false;
   }
-
+#if defined(MBEDTLS_VERSION_NUMBER) && (MBEDTLS_VERSION_NUMBER >= 0x03000000)
+  if (mbedtls_pk_get_type(&sd->pkey) != MBEDTLS_PK_NONE) {
+#else
   if (sd->pkey.pk_info) {
+#endif
     // this would get set if options.key was set
     if (( ret = mbedtls_ssl_conf_own_cert(&sd->conf, &sd->owncert, &sd->pkey)) != 0 ) {
       JsVar *e = jswrap_crypto_error_to_jsvar(ret);
@@ -592,11 +620,13 @@ bool ssl_newSocketData(int sckt, JsVar *options) {
       return false;
     }
   }
+
   // FIXME no cert checking!
   mbedtls_ssl_conf_authmode( &sd->conf, MBEDTLS_SSL_VERIFY_NONE );
   mbedtls_ssl_conf_ca_chain( &sd->conf, &sd->cacert, NULL );
   mbedtls_ssl_conf_rng( &sd->conf, mbedtls_ctr_drbg_random, &sd->ctr_drbg );
   mbedtls_ssl_conf_dbg( &sd->conf, ssl_debug, 0 );
+  //mbedtls_debug_set_threshold(3); // needs CONFIG_MBEDTLS_DEBUG in sdkconfig
 
   if (( ret = mbedtls_ssl_setup( &sd->ssl, &sd->conf )) != 0) {
     JsVar *e = jswrap_crypto_error_to_jsvar(ret);
@@ -606,7 +636,9 @@ bool ssl_newSocketData(int sckt, JsVar *options) {
     return false;
   }
 
-  if (( ret = mbedtls_ssl_set_hostname( &sd->ssl, "mbed TLS Server 1" )) != 0) {
+
+
+  if (( ret = mbedtls_ssl_set_hostname( &sd->ssl, hostname)) != 0) {
     JsVar *e = jswrap_crypto_error_to_jsvar(ret);
     jsExceptionHere(JSET_INTERNALERROR, "HTTPS init failed! mbedtls_ssl_set_hostname: %v", e );
     jsvUnLock(e);
@@ -713,8 +745,8 @@ int netRecv(JsNetwork *net, SocketType socketType, int sckt, void *buf, size_t l
     if (sd->connecting) return 0; // busy
 
     int ret = mbedtls_ssl_read( &sd->ssl, buf, len );
-    if( ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE )
-      return 0;
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) return SOCKET_ERR_CLOSED; // peer wants socket closed
     return ret;
   } else
 #endif

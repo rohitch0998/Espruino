@@ -105,7 +105,7 @@ void lcd_flip_gfx(JsGraphics *gfx) {
   JsVar *buf = jsvObjectGetChildIfExists(gfx->graphicsVar,"buffer");
   if (!buf) return;
   JSV_GET_AS_CHAR_ARRAY(bPtr, bLen, buf);
-  if (!bPtr || bLen<128*8) return;
+  if (!bPtr || bLen<128*8) return; // already errored
 
   int xcoord = gfx->data.modMinX&~7;
   int xlen = gfx->data.modMaxX+1-xcoord;
@@ -426,7 +426,7 @@ void jswrap_pixljs_init() {
         (jshPinGetValue(BTN4_PININDEX) == BTN4_ONSTATE)))
     splashScreen = jsfReadFile(jsfNameFromString(".splash"),0,0);
   if (jsvIsString(splashScreen)) {
-    if (jsvGetStringLength(splashScreen)) {
+    if (!jsvIsEmptyString(splashScreen)) {
       graphicsSetVar(&gfx);
       jsvUnLock(jswrap_graphics_drawImage(graphics, splashScreen,0,0,0));
       graphicsGetFromVar(&gfx, graphics);
@@ -498,7 +498,7 @@ DEPRECATED: Use `E.showMenu`
 type MenuBooleanItem = {
   value: boolean;
   format?: (value: boolean) => string;
-  onchange?: (value: boolean) => void;
+  onchange?: (value: boolean, evt?: TouchCallbackXY) => void;
 };
 
 /**
@@ -507,7 +507,7 @@ type MenuBooleanItem = {
 type MenuNumberItem = {
   value: number;
   format?: (value: number) => string;
-  onchange?: (value: number) => void;
+  onchange?: (value: number, evt?: TouchCallbackXY) => void;
   step?: number;
   min?: number;
   max?: number;
@@ -543,10 +543,10 @@ type Menu = {
   ""?: MenuOptions;
   [key: string]:
     | MenuOptions
-    | (() => void)
+    | ((e?: TouchCallbackXY) => void)
     | MenuBooleanItem
     | MenuNumberItem
-    | { value: string; onchange?: () => void }
+    | { value: string; onchange?: (value: unknown, evt?: TouchCallbackXY) => void }
     | undefined;
 };
 
@@ -555,8 +555,6 @@ type Menu = {
  *\/
 type MenuInstance = {
   draw: () => void;
-  move: (n: number) => void;
-  select: () => void;
   scroller?: MenuScroller; // BangleJS 2
 };
 
@@ -591,6 +589,7 @@ it references will be executed. For example:
 ```
 var boolean = false;
 var number = 50;
+var option = 0;
 // First menu
 var mainmenu = {
   "" : { "title" : "-- Main Menu --" },
@@ -604,9 +603,15 @@ var mainmenu = {
   },
   "A Number" : {
     value : number,
-    min:0,max:100,step:10,
+    min:0, max:100, step:10,
     // noList : true, // On Bangle.js devices this forces use of the number-chooser (and not a scrolling list)
     onchange : v => { number=v; }
+  },
+  "List of Options" : {
+    value : option,
+    min:0, max:3,
+    format : v => ["Zero","One","Two","Three"][v],
+    onchange : v => { option=v; }
   },
   "Exit" : function() { E.showMenu(); }, // remove the menu
 };
@@ -622,9 +627,10 @@ E.showMenu(mainmenu);
 ```
 
 The menu will stay onscreen and active until explicitly removed, which you can
-do by calling `E.showMenu()` without arguments.
+do by calling `E.showMenu()` without arguments (or `Bangle.setUI()` on Bangle.js).
 
-See http://www.espruino.com/graphical_menu for more detailed information.
+See http://www.espruino.com/graphical_menu for more detailed information. For
+Bangle.js Settings Pages see https://www.espruino.com/Bangle.js+App+Settings
 */
 
 /*JSON{
@@ -734,5 +740,5 @@ To remove the window, call `E.showAlert()` with no arguments.
   "generate" : "jswrap_pixljs_powerusage"
 }*/
 void jswrap_pixljs_powerusage(JsVar *devices) {
-  jsvObjectSetChildAndUnLock(devices, "LCD", jsvNewFromInteger(lcdIsOn ? 170 : 20));
+  jsvObjectSetIntChild(devices, "LCD", lcdIsOn ? 170 : 20);
 }

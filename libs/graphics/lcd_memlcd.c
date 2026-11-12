@@ -23,7 +23,16 @@
 // ======================================================================
 
 #define LCD_SPI EV_SPI1
+#ifdef LCD_CONTROLLER_ZJ012BD01A
+#include "jswrap_bangle3.h"
+#define LCD_ROWHEADER 0
+#define LCD_CS_ON 0
+#define LCD_CS_OFF 1
+#else
 #define LCD_ROWHEADER 2
+#define LCD_CS_ON 1
+#define LCD_CS_OFF 0
+#endif
 #define LCD_STRIDE (LCD_ROWHEADER+((LCD_WIDTH*LCD_BPP+7)>>3)) // data in required BPP, plus 2 bytes LCD command
 
 /** Buffer for our LCD data.
@@ -36,6 +45,10 @@ bool isBacklightOn; ///< is LCD backlight on? If so we need to pulse EXTCOMIN fa
 JsVar *lcdOverlayImage; ///< if set, an Image to use for overlays
 short lcdOverlayX,lcdOverlayY; ///< coordinates of the graphics instance
 volatile bool lcdIsBusy; ///< We're now allowing SPI send in the background - if we're sending, block execution until it finishes
+volatile lcdMemLCDCallbackFn lcdFinishedCallback; ///< if set, we call this back when we finished messing with the LCD
+#if LCD_WIDTH!=176
+bool fake176 = false; ///< We can set this up to fake a 176 pixel screen by offsetting it by 32 pixels
+#endif
 
 #ifdef EMULATED
 bool EMSCRIPTEN_GFX_CHANGED;
@@ -53,18 +66,38 @@ char *jsGfxGetPtr(int line) {
 #endif
 
 // bayer dithering pattern
+#if LCD_BPP!=6 // 3/4 bit
 #define BAYER_RGBSHIFT(b) (b<<13) | (b<<8) | (b<<2)
 const unsigned short BAYER2[2][2] = {
     { BAYER_RGBSHIFT(1), BAYER_RGBSHIFT(5) },
     { BAYER_RGBSHIFT(7), BAYER_RGBSHIFT(3) }
 };
+#else // 6 bit
+#define BAYER_RGBSHIFT(b) (b<<12) | (b<<7) | (b<<1)
+const unsigned short BAYER2[2][2] = {
+    { BAYER_RGBSHIFT(0), BAYER_RGBSHIFT(2) },
+    { BAYER_RGBSHIFT(3), BAYER_RGBSHIFT(1) }
+};
+#endif
 
 static ALWAYS_INLINE unsigned int lcdMemLCD_convert16toLCD(unsigned int c, int x, int y) {
-  c = (c&0b1110011100011100) + BAYER2[y&1][x&1];
-  return
+#if LCD_BPP!=6 // 3/4 bit
+  c = (c&0b1110011100011100) + BAYER2[y&1][x&1];// apply bayer 2x2 dither
+  // 3 bit, so all we have to do now is look for the carry bit
+  return (((c&0b10000100000100000)*0x2041)>>16)&7; // code below replaced by magic multiply bitshift which avoids branches
+  /*return
       ((c&0x10000)?1:0) |
       ((c&0x00800)?2:0) |
-      ((c&0x00020)?4:0);
+      ((c&0x00020)?4:0);*/
+#else // 6 bit
+  c =   (c&0b01111011110011110) + BAYER2[y&1][x&1]; // apply bayer 2x2 dither
+  c |= ((c&0b10000100000100000)*3) >> 2; // saturate top 2 bits of each of the 3 channels at once
+  return (((c&0b1100011000011000)*0x8081)>>14)&63; // code below replaced by magic multiply bitshift which avoids branches
+  /*return // convert 16 bpp down to 6bpp
+      ((c&0xC000)>>14) |
+      ((c&0x0600)>>7) |
+      ((c&0x0018)<<1);*/
+#endif
 }
 
 /** 'Flip' now ends while data is still sending to the LCD. This
@@ -73,12 +106,16 @@ static ALWAYS_INLINE unsigned int lcdMemLCD_convert16toLCD(unsigned int c, int x
  * is on the LCD.
  */
 static ALWAYS_INLINE void lcdMemLCD_waitForSendComplete() {
-  int timeout = 1000000;
+  volatile int timeout = 10000000;
   while (lcdIsBusy && --timeout) {};
   if (lcdIsBusy) {
-    // LCD timeout! Do we want to log this?
+    jsWarn("LCD timeout");
     lcdIsBusy = false;
   }
+}
+
+bool lcdMemLCD_isBusy() {
+  return lcdIsBusy;
 }
 
 // ======================================================================
@@ -89,6 +126,9 @@ unsigned char *lcdMemLCD_getRowPtr(int row) {
 }
 
 unsigned int lcdMemLCD_getPixel(JsGraphics *gfx, int x, int y) {
+#if LCD_WIDTH!=176
+  if (fake176) { x += 32; y += 32; }
+#endif
 #if LCD_BPP==3
   int bitaddr = LCD_ROWHEADER*8 + (x*3) + (y*LCD_STRIDE*8);
   int bit = bitaddr&7;
@@ -100,21 +140,31 @@ unsigned int lcdMemLCD_getPixel(JsGraphics *gfx, int x, int y) {
   unsigned char b = lcdBuffer[addr];
   unsigned int c = (x&1) ? ((b>>1)&7) : (b>>5);
 #endif
+#if LCD_BPP==6
+  int bitaddr = LCD_ROWHEADER*8 + (x*6) + (y*LCD_STRIDE*8);
+  int bit = bitaddr&7;
+  uint16_t b = *(uint16_t*)&lcdBuffer[bitaddr>>3]; // get in MSB format
+  unsigned int c = (b>>bit) & 0x3F;
+  unsigned int cr = c&3, cg = (c>>2)&3, cb = (c>>4)&3; // convert 6 back to 16 bit colour (LUT would be faster)
+  const unsigned int twoToFive[] = { 0, 0b01010, 0b10101, 0b11111 }; // LUT to convert 2 back to 5bpp
+  return  (twoToFive[cb]) | (((twoToFive[cg]<<1) | (cg>>1))<<5) | (twoToFive[cr]<<11);
+#else
   return  ((((c)&1)?0xF800:0)|(((c)&2)?0x07E0:0)|(((c)&4)?0x001F:0));
+#endif
 }
 
 /*
 
-
+// 3 bit
  0123456701234567
  RGB               bpp=0,
               RGB  bpp=13
 
-
-
-
  */
 void lcdMemLCD_setPixel(JsGraphics *gfx, int x, int y, unsigned int col) {
+#if LCD_WIDTH!=176
+  if (fake176) { x += 32; y += 32; }
+#endif
   col =  lcdMemLCD_convert16toLCD(col,x,y);
   lcdMemLCD_waitForSendComplete();
 #if LCD_BPP==3
@@ -128,9 +178,18 @@ void lcdMemLCD_setPixel(JsGraphics *gfx, int x, int y, unsigned int col) {
   if (x&1) lcdBuffer[addr] = (lcdBuffer[addr] & 0x0F) | (col << 4);
   else lcdBuffer[addr] = (lcdBuffer[addr] & 0xF0) | col;
 #endif
+#if LCD_BPP==6
+  int bitaddr = LCD_ROWHEADER*8 + (x*6) + (y*LCD_STRIDE*8);
+  int bit = bitaddr&7;
+  uint16_t b = *(uint16_t*)&lcdBuffer[bitaddr>>3];
+  *(uint16_t*)&lcdBuffer[bitaddr>>3] = (b & ~(0x3F<<bit)) | (col<<bit);
+#endif
 }
 
 void lcdMemLCD_fillRect(struct JsGraphics *gfx, int x1, int y1, int x2, int y2, unsigned int col) {
+#if LCD_WIDTH!=176
+  if (fake176) { x1 += 32; y1 += 32; x2 += 32; y2 += 32; }
+#endif
   lcdMemLCD_waitForSendComplete();
   // Super-fast fill if whole width
   if (x1==0 && x2==LCD_WIDTH-1 && (col==0 || col==0xFFFF)) {
@@ -174,6 +233,29 @@ void lcdMemLCD_fillRect(struct JsGraphics *gfx, int x1, int y1, int x2, int y2, 
     return;
   }
 #endif
+#if LCD_BPP==6
+  /* On 6bpp if we're filling a small width of pixels, just set them individually */
+  if (true) { // do it always for now
+    // precalculate what the 2 pixels go to
+    unsigned int cols[2][2] = {
+        { lcdMemLCD_convert16toLCD(col,0,0), lcdMemLCD_convert16toLCD(col,1,0) }, // even row
+        { lcdMemLCD_convert16toLCD(col,0,1), lcdMemLCD_convert16toLCD(col,1,1) } // odd row
+    };
+    // write pixels individually
+    for (int y=y1;y<=y2;y++) {
+      unsigned int *c = cols[y&1];
+      int bitaddr = LCD_ROWHEADER*8 + (x1*6) + (y*LCD_STRIDE*8);
+      for (int x=x1;x<=x2;x++) {
+        int bit = bitaddr&7;
+        uint16_t b = *(uint16_t*)&lcdBuffer[bitaddr>>3];
+        *(uint16_t*)&lcdBuffer[bitaddr>>3] = (b & ~(0x3F<<bit)) | (c[x&1]<<bit);
+        bitaddr += 6;
+      }
+    }
+    return;
+  }
+#endif
+
 
   for (int y=y1;y<=y2;y++) {
 #if LCD_BPP==3
@@ -220,6 +302,7 @@ void lcdMemLCD_fillRect(struct JsGraphics *gfx, int x1, int y1, int x2, int y2, 
     if (!(x2&1)) // final pixel on an even coordinate, unaligned
       lcdBuffer[addr] = (lcdBuffer[addr] & 0xF0) | (ditheredCol&0x0F);
 #endif
+    // FIXME 6 bit
   }
 }
 
@@ -253,6 +336,9 @@ void lcdMemLCD_scroll(struct JsGraphics *gfx, int xdir, int ydir, int x1, int y1
   if (x1!=0 || x2!=LCD_WIDTH-1)
     return graphicsFallbackScroll(gfx, xdir, ydir, x1,y1,x2,y2);
   // otherwise...
+#if LCD_WIDTH!=176
+  if (fake176) { x1 += 32; y1 += 32; x2 += 32; y2 += 32; }
+#endif
   unsigned char lineBuffer[LCD_STRIDE+4]; // allow out of bounds write
   if (ydir<=0) {
     for (int y=y1;y<=y2+ydir;y++) {
@@ -274,8 +360,20 @@ void lcdMemLCD_scroll(struct JsGraphics *gfx, int xdir, int ydir, int x1, int y1
 void lcdMemLCD_flip_spi_ovr_callback() {}
 // used to allow SPI send to work async for normal sends.
 void lcdMemLCD_flip_spi_callback() {
-  jshPinSetValue(LCD_SPI_CS, 0);
+#ifndef EMULATED
+  jshPinSetValue(LCD_SPI_CS, LCD_CS_OFF);
+#endif
   lcdIsBusy = false;
+  if (lcdFinishedCallback) {
+    jsiConsolePrintf("lcdFinishedCallback\n");
+    jshDelayMicroseconds(10); // give CS time to settle
+    lcdFinishedCallback();
+    lcdFinishedCallback = NULL;
+  }
+}
+// Mirror X - use when doing overlays when screen is rotated 180
+static void _lcdMemLCD_setPixel_mirrored(JsGraphics *gfx, int x, int y, unsigned int col) {
+  lcdMemLCD_setPixel(gfx, (LCD_WIDTH-1)-x, y, col);
 }
 // send the data to the screen
 void lcdMemLCD_flip(JsGraphics *gfx) {
@@ -291,10 +389,30 @@ void lcdMemLCD_flip(JsGraphics *gfx) {
 
   bool hasOverlay = false;
   GfxDrawImageInfo overlayImg;
-  if (lcdOverlayImage)
+  if (lcdOverlayImage) {
+    // Set colors to current theme
+    unsigned int oldFgColor = gfx->data.fgColor;
+    unsigned int oldBgColor = gfx->data.bgColor;
+    gfx->data.fgColor = graphicsTheme.fg;
+    gfx->data.bgColor = graphicsTheme.bg;
+    // parse image (which will generate palette)
     hasOverlay = _jswrap_graphics_parseImage(gfx, lcdOverlayImage, 0, &overlayImg);
+    // Restore colors to previous state
+    gfx->data.fgColor = oldFgColor;
+    gfx->data.bgColor = oldBgColor;
+  }
 
-  jshPinSetValue(LCD_SPI_CS, 1);
+#ifndef EMULATED
+  jshPinSetValue(LCD_SPI_CS, LCD_CS_ON);
+#endif
+#ifdef LCD_CONTROLLER_ZJ012BD01A
+  jshDelayMicroseconds(10); // give it time to wake
+  jshPY32Update(PY32_CMD_DISPLAY, y1); // send command by soft SPI
+  // CS already turned off by jshPY32Update/jshPY32Transfer
+  jshDelayMicroseconds(200+y1*2); // time to process NSS and get to correct riw
+  jshPinSetValue(LCD_SPI_CS, LCD_CS_ON);
+  jshDelayMicroseconds(10);
+#endif
   if (hasOverlay) {
     /* If lcdOverlayImage is defined, we want to overlay this image
      * on top of what we have in our LCD buffer. Do this line by
@@ -310,41 +428,30 @@ void lcdMemLCD_flip(JsGraphics *gfx) {
     // Take account of rotation - only check for a full 180 rotation - doing 90 is too hard
     bool isRotated180 = (graphicsInternal.data.flags & (JSGRAPHICSFLAGS_SWAP_XY | JSGRAPHICSFLAGS_INVERT_X | JSGRAPHICSFLAGS_INVERT_Y)) ==
                       (JSGRAPHICSFLAGS_INVERT_X | JSGRAPHICSFLAGS_INVERT_Y);
-    int ovY = isRotated180 ? (LCD_HEIGHT-(lcdOverlayY+overlayImg.height)) : lcdOverlayY;
-    // Set colors to current theme
-    unsigned int oldFgColor = gfx->data.fgColor;
-    unsigned int oldBgColor = gfx->data.bgColor;
-    gfx->data.fgColor = graphicsTheme.fg;
-    gfx->data.bgColor = graphicsTheme.bg;
-    // initialise image layer
-    GfxDrawImageLayer l;
-    l.x1 = 0;
-    l.y1 = ovY * 256;
-    l.img = overlayImg;
-    l.rotate = isRotated180 ? 3.141592 : 0;
-    l.scale = 1;
-    l.center = false;
-    l.repeat = false;
-    jsvStringIteratorNew(&l.it, l.img.buffer, (size_t)l.img.bitmapOffset);
-    _jswrap_drawImageLayerInit(&l);
-    _jswrap_drawImageLayerSetStart(&l, 0, y1);
-    for (int y=y1;y<=y2;y++) {
+    int ovY = lcdOverlayY;
+    int yd = 1;
+    JsGraphicsSetPixelFn setPixel = lcdMemLCD_setPixel;
+    int bits = (ovY<y1) ? (ovY-y1)*overlayImg.bpp*overlayImg.width : 0;
+    uint32_t colData;
+    if (isRotated180) {
+      yd = -1;
+      int y = y1;
+      y1 = y2;
+      y2 = y-1;
+      ovY = LCD_HEIGHT-(lcdOverlayY+overlayImg.height);
+      setPixel = _lcdMemLCD_setPixel_mirrored;
+    } else y2++;
+    JsvStringIterator it;
+    jsvStringIteratorNew(&it, overlayImg.buffer, (size_t)overlayImg.bitmapOffset);
+    for (int y=y1;y!=y2;y+=yd) {
       int bufferLine = LCD_HEIGHT + (y&1); // alternate lines so we still get dither AND we can send while calculating next line
       unsigned char *buf = &lcdBuffer[LCD_STRIDE*bufferLine]; // point to line right on the end of gfx
       // copy original line in
       memcpy(buf, &lcdBuffer[LCD_STRIDE*y], LCD_STRIDE);
       // overwrite areas with overlay image
       if (y>=ovY && y<ovY+overlayImg.height) {
-        _jswrap_drawImageLayerStartX(&l);
-        for (int x=0;x<overlayImg.width;x++) {
-          uint32_t c;
-          int ox = x+lcdOverlayX;
-          if (_jswrap_drawImageLayerGetPixel(&l, &c) && (ox < LCD_WIDTH) && (ox >= 0))
-            lcdMemLCD_setPixel(NULL, ox, bufferLine, c);
-          _jswrap_drawImageLayerNextX(&l);
-        }
+        _jswrap_drawImageSimpleRow(gfx, lcdOverlayX, bufferLine, &overlayImg, &it, setPixel, &bits, &colData);
       }
-      _jswrap_drawImageLayerNextY(&l);
       // send the line
 #ifdef EMULATED
       memcpy(&fakeLCDBuffer[LCD_STRIDE*y], buf, LCD_STRIDE);
@@ -352,24 +459,25 @@ void lcdMemLCD_flip(JsGraphics *gfx) {
       jshSPISendMany(LCD_SPI, buf, NULL, LCD_STRIDE, lcdMemLCD_flip_spi_ovr_callback);
 #endif
     }
-    jsvStringIteratorFree(&l.it);
+    jsvStringIteratorFree(&it);
     _jswrap_graphics_freeImageInfo(&overlayImg);
     // and 2 final bytes to finish the transfer
-#ifndef EMULATED
+#if defined(LCD_CONTROLLER_LPM013M126) && !defined(EMULATED)
     jshSPISendMany(LCD_SPI, lcdBuffer, NULL, 2, NULL);
     lcdMemLCD_flip_spi_callback();
 #endif
-    // Restore colors to previous state
-    gfx->data.fgColor = oldFgColor;
-    gfx->data.bgColor = oldBgColor;
   } else { // standard, non-overlay
 #ifdef EMULATED
     memcpy(fakeLCDBuffer, lcdBuffer, LCD_HEIGHT*LCD_STRIDE);
 #else
     lcdIsBusy = true;
-    if (!jshSPISendMany(LCD_SPI, &lcdBuffer[LCD_STRIDE*y1], NULL, (l*LCD_STRIDE)+2, lcdMemLCD_flip_spi_callback))
+    int trailingBytes = 0;
+#if defined(LCD_CONTROLLER_LPM013M126)
+    trailingBytes = 2;
+#endif
+    if (!jshSPISendMany(LCD_SPI, &lcdBuffer[LCD_STRIDE*y1], NULL, (l*LCD_STRIDE)+trailingBytes, lcdMemLCD_flip_spi_callback))
       lcdMemLCD_flip_spi_callback();
-    // lcdMemLCD_flip_spi_callback will call jshPinSetValue(LCD_SPI_CS, 0); when done and set lcdIsBusy=false
+    // lcdMemLCD_flip_spi_callback will call jshPinSetValue(LCD_SPI_CS, LCD_CS_OFF); when done and set lcdIsBusy=false
 #endif
   }
   // Reset modified-ness
@@ -384,17 +492,20 @@ void lcdMemLCD_init(JsGraphics *gfx) {
   gfx->data.height = LCD_HEIGHT;
   gfx->data.bpp = 16; // take color as 16 bit even though we only use 3
   memset(lcdBuffer,0,sizeof(lcdBuffer));
+#if LCD_ROWHEADER>0
   for (int y=0;y<LCD_HEIGHT;y++) {
-#if LCD_BPP==3
-    lcdBuffer[y*LCD_STRIDE]=jswrap_espruino_reverseByte(0b10000000);
-#endif
-#if LCD_BPP==4
-    lcdBuffer[y*LCD_STRIDE]=jswrap_espruino_reverseByte(0b10010000);
-#endif
-    lcdBuffer[(y*LCD_STRIDE)+1]=jswrap_espruino_reverseByte(y+1);
+  #if LCD_BPP==3
+      lcdBuffer[y*LCD_STRIDE]=jswrap_espruino_reverseByte(0b10000000);
+  #endif
+  #if LCD_BPP==4
+      lcdBuffer[y*LCD_STRIDE]=jswrap_espruino_reverseByte(0b10010000);
+  #endif
+      lcdBuffer[(y*LCD_STRIDE)+1]=jswrap_espruino_reverseByte(y+1);
   }
+#endif
 
-  jshPinOutput(LCD_SPI_CS,0);
+#ifdef NRF52_SERIES
+  jshPinOutput(LCD_SPI_CS,LCD_CS_OFF);
   jshPinOutput(LCD_SPI_SCK,1);
   jshPinOutput(LCD_SPI_MOSI,1);
   jshPinOutput(LCD_DISP,1);
@@ -407,40 +518,80 @@ void lcdMemLCD_init(JsGraphics *gfx) {
   inf.pinSCK = LCD_SPI_SCK;
   inf.spiMSB = false; // LSB first!
   jshSPISetup(LCD_SPI, &inf);
+#endif
 }
 
 // pulse EXTCOMIN to avoid burn-in
 void lcdMemLCD_extcominToggle() {
+#ifdef NRF52_SERIES
   if (!isBacklightOn) {
     jshPinSetValue(LCD_EXTCOMIN, 1);
     jshDelayMicroseconds(2); // datasheet saus 2uS min rise time
     jshPinSetValue(LCD_EXTCOMIN, 0);
   }
+#endif
 }
 
 // If backlight is on, we need to raise EXTCOMIN freq (use HW PWM)
 void lcdMemLCD_extcominBacklight(bool isOn) {
   isBacklightOn = isOn;
+#ifdef NRF52_SERIES
   if (isOn) {
     jshPinAnalogOutput(LCD_EXTCOMIN, 0.0003, 120, JSAOF_NONE); // ~3us
   } else {
     jshPinOutput(LCD_EXTCOMIN, 0);
   }
+#endif
 }
 
 // Enable overlay mode (to overlay a graphics instance on top of the LCD contents)
 void lcdMemLCD_setOverlay(JsVar *imgVar, int x, int y) {
-  if (lcdOverlayImage) jsvUnLock(lcdOverlayImage);
+  if (lcdOverlayImage) {
+    lcdMemLCD_setOverlayModified(&graphicsInternal); // add the area where the overlay *was*
+    jsvUnLock(lcdOverlayImage);
+  }
   if (imgVar) {
     lcdOverlayImage = jsvLockAgain(imgVar);
     lcdOverlayX = (short)x;
     lcdOverlayY = (short)y;
+    lcdMemLCD_setOverlayModified(&graphicsInternal); // add the area where the overlay *is now*
   } else {
     lcdOverlayImage = 0;
     lcdOverlayX = 0;
     lcdOverlayY = 0;
   }
 }
+
+// Sets the modified x/y to the overlay dimensions
+void lcdMemLCD_setOverlayModified(JsGraphics *gfx) {
+  if (lcdOverlayImage) {
+    GfxDrawImageInfo overlayImg;
+    if (_jswrap_graphics_parseImage(gfx, lcdOverlayImage, 0, &overlayImg)) {
+      int x = lcdOverlayX<0?0:lcdOverlayX;
+      int y = lcdOverlayY<0?0:lcdOverlayY;
+      int x2 = lcdOverlayX + overlayImg.width-1;
+      if (x2>LCD_WIDTH-1) x2=LCD_WIDTH-1;
+      int y2 = lcdOverlayY + overlayImg.height-1;
+      if (y2>LCD_HEIGHT-1) y2=LCD_HEIGHT-1;
+      graphicsSetModified(gfx, x,y,x2,y2);
+       _jswrap_graphics_freeImageInfo(&overlayImg);
+    }
+  } else { // no overlay - redraw everything
+    graphicsInternal.data.modMinX = 0;
+    graphicsInternal.data.modMinY = 0;
+    graphicsInternal.data.modMaxX = LCD_WIDTH-1;
+    graphicsInternal.data.modMaxY = LCD_HEIGHT-1;
+  }
+}
+
+#if LCD_WIDTH!=176
+void lcdMemLCD_setFake176(bool isFake) {
+  fake176 = isFake;
+}
+bool lcdMemLCD_getFake176() {
+  return fake176;
+}
+#endif
 
 void lcdMemLCD_setCallbacks(JsGraphics *gfx) {
   gfx->setPixel = lcdMemLCD_setPixel;
@@ -449,3 +600,11 @@ void lcdMemLCD_setCallbacks(JsGraphics *gfx) {
   gfx->scroll = lcdMemLCD_scroll;
 }
 
+void lcdMemLCD_callWhenIdle(lcdMemLCDCallbackFn callback) {
+  if (lcdIsBusy) {
+    if (lcdFinishedCallback)
+      jsWarn("duplicate lcdFinishedCallback\n");
+    lcdFinishedCallback = callback;
+  } else
+    callback();
+}

@@ -8,16 +8,16 @@ ifeq ($(CHIP),ESP32C3)
 	SDKCONFIG = sdkconfig_c3
 	FMW_BIN_NAME = espruino-esp32c3
 	PORT ?= /dev/ttyACM0
-else 
+else
 	ifeq ($(CHIP),ESP32)
-		SDKCONFIG = sdkconfig
+		SDKCONFIG = sdkconfig.defaults
 		FMW_BIN_NAME = espruino-esp32
 		PORT ?= /dev/ttyUSB0
 	else
 		ifeq ($(CHIP),ESP32S3)
 			SDKCONFIG = sdkconfig_s3
 			FMW_BIN_NAME = espruino-esp32s3
-			PORT ?= /dev/ttyUSB0
+			PORT ?= /dev/ttyACM0
 		else
 			$(error Unknown ESP32 chip)
 		endif
@@ -51,7 +51,7 @@ $(CMAKEFILE):
 
 
 $(PROJ_NAME).bin: $(CMAKEFILE) $(PLATFORM_CONFIG_FILE) $(PININFOFILE).h $(PININFOFILE).c $(WRAPPERFILE)
-	$(Q)cp ${ROOT}/targets/esp32/IDF4/${SDKCONFIG} $(BINDIR)/sdkconfig
+	$(Q)cp ${ROOT}/targets/esp32/IDF4/${SDKCONFIG} $(BINDIR)/sdkconfig.defaults
 	$(Q)cp ${ROOT}/targets/esp32/IDF4/CMakeLists.txt $(BINDIR)
 	$(Q)cp ${ROOT}/targets/esp32/IDF4/partitions.csv $(BINDIR)
 	cd $(BINDIR) && idf.py build
@@ -80,3 +80,12 @@ flash: $(PROJ_NAME).bin
 flashmonitor: $(PROJ_NAME).bin
 	cd $(BINDIR) && idf.py flash -p $(PORT)
 	cd $(BINDIR) && idf.py monitor -p $(PORT)
+
+openocd: $(PROJ_NAME).bin
+	@echo "ESP32C3 only. Now run '...make gdb' in a new window"
+	cd $(BINDIR) && idf.py openocd --openocd-commands "-f board/esp32c3-builtin.cfg -c 'gdb_memory_map disable'"
+
+gdb: $(PROJ_NAME).bin
+	@echo "ESP32C3 only. Ensure '...make openocd' was run first in another window"
+	cd $(BINDIR) && OPENOCD_COMMANDS="-f board/esp32c3-builtin.cfg" idf.py gdb
+

@@ -223,6 +223,8 @@ else ifeq ($(FAMILY),ESP32)
 USE_ESP32=1
 else ifeq ($(FAMILY),ESP32_IDF4)
 USE_ESP32=1
+else ifeq ($(FAMILY),ESP32_IDF5)
+USE_ESP32=1
 else ifdef EMW3165
 USE_WICED=1
 else ifdef CC3000
@@ -270,6 +272,7 @@ src/jswrap_json.c \
 src/jswrap_number.c \
 src/jswrap_object.c \
 src/jswrap_regexp.c \
+src/jswrap_timer.c \
 src/jswrap_string.c \
 src/jswrap_modules.c \
 src/jswrap_math.c
@@ -393,14 +396,8 @@ DEFINES += -DUSE_FILESYSTEM_SDIO
 SOURCES += libs/filesystem/fat_sd/sdio_diskio.c
 # sdio_sdcard_X.c is added in make/family/X.make
 else #USE_FILESYSTEM_SDIO
-ifdef USE_FLASHFS
-DEFINES += -DUSE_FLASHFS
-SOURCES += \
-libs/filesystem/fat_sd/flash_diskio.c
-else
 SOURCES += \
 libs/filesystem/fat_sd/spi_diskio.c
-endif #USE_FLASHFS
 endif #USE_FILESYSTEM_SDIO
 endif #!LINUX
 endif #USE_FILESYSTEM
@@ -421,8 +418,37 @@ libs/graphics/lcd_js.c
 ifeq ($(USE_LCD_SDL),1)
   DEFINES += -DUSE_LCD_SDL
   SOURCES += libs/graphics/lcd_sdl.c
-  LIBS += -lSDL
-  INCLUDE += -I/usr/include/SDL
+  # Prefer SDL2 if available
+  SDL2_CONFIG?=$(shell which sdl2-config 2>/dev/null)
+
+  ifdef MACOSX
+    $(info ********* MacOS build - using static SDL2 *********)
+    ifneq ($(SDL2_CONFIG),)
+      INCLUDE += $(shell $(SDL2_CONFIG) --cflags)
+      LIBS += $(shell $(SDL2_CONFIG) --static-libs)
+    else
+      # Fallback: try Mac platform defaults
+      # Link frameworks and ObjC runtime; SDL2 static lib name left to user's LIBS if needed
+      LIBS += -lobjc \
+              -Wl,-framework,Cocoa \
+              -Wl,-framework,OpenGL \
+              -Wl,-framework,IOKit \
+              -Wl,-framework,CoreFoundation \
+              -Wl,-framework,CoreVideo \
+              -lSDL2
+      INCLUDE += -I/usr/local/include/SDL2 -I/opt/homebrew/include/SDL2 -I/usr/include/SDL2
+    endif
+  else
+    $(info ********* Linux build - using dynamic SDL2 *********)
+    ifneq ($(SDL2_CONFIG),)
+      INCLUDE += $(shell $(SDL2_CONFIG) --cflags)
+      LIBS += $(shell $(SDL2_CONFIG) --libs)
+    else
+      # Fallback to typical SDL2 defaults; users can adjust via environment
+      LIBS += -lSDL2
+      INCLUDE += -I/usr/include/SDL2
+    endif
+  endif
 endif
 
 ifdef USE_LCD_FSMC
@@ -621,7 +647,7 @@ ifeq ($(USE_BLUETOOTH),1)
   DEFINES += -DBLUETOOTH
   INCLUDE += -I$(ROOT)/libs/bluetooth
   WRAPPERSOURCES += libs/bluetooth/jswrap_bluetooth.c
-  SOURCES += libs/bluetooth/bluetooth_utils.c
+  SOURCES += libs/bluetooth/bluetooth_utils.c libs/bluetooth/bluetooth_common.c
 endif
 
 ifeq ($(USE_CRYPTO),1)
@@ -670,12 +696,6 @@ ifeq ($(USE_NFC),1)
   TARGETSOURCES    += $(NRF5X_SDK_PATH)/components/nfc/t2t_lib/hal_t2t/hal_nfc_t2t.c
 endif
 
-ifeq ($(USE_WIO_LTE),1)
-  INCLUDE += -I$(ROOT)/libs/wio_lte
-  WRAPPERSOURCES += libs/wio_lte/jswrap_wio_lte.c
-  SOURCES += targets/stm32/stm32_ws2812b_driver.c
-endif
-
 ifeq ($(USE_TENSORFLOW),1)
 include make/misc/tensorflow.make
 endif
@@ -694,6 +714,8 @@ endif # BOOTLOADER ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ DON'T USE STUFF AB
 
 all: 	 proj
 # =========================================================================
+PININFOFILE=$(GENDIR)/jspininfo
+
 ifneq ($(FAMILY),)
 include make/family/$(FAMILY).make
 endif
@@ -704,7 +726,6 @@ ifdef USB
 DEFINES += -DUSB
 endif
 
-PININFOFILE=$(GENDIR)/jspininfo
 SOURCES += $(PININFOFILE).c
 WRAPPERSOURCES += $(ESPRUINO_WRAPPERSOURCES)
 SOURCES += $(WRAPPERSOURCES) $(TARGETSOURCES)
@@ -796,14 +817,14 @@ docs:
 	$(Q)python scripts/build_docs.py $(WRAPPERSOURCES) $(DEFINES) -B$(BOARD)
 	@echo functions.html created
 
-$(WRAPPERFILE): scripts/build_jswrapper.py $(WRAPPERSOURCES)
+$(WRAPPERFILE): boards/$(BOARD).py scripts/build_jswrapper.py scripts/common.py $(WRAPPERSOURCES)
 	@echo ================================== Generating JS wrappers
 	$(Q)echo WRAPPERSOURCES = $(WRAPPERSOURCES)
 	$(Q)echo DEFINES =  $(DEFINES)
 	$(Q)$(PYTHON) scripts/build_jswrapper.py $(WRAPPERSOURCES) $(JSMODULESOURCES) $(DEFINES) -B$(BOARD) -F$(WRAPPERFILE)
 
 ifdef PININFOFILE
-$(PININFOFILE).c $(PININFOFILE).h: scripts/build_pininfo.py
+$(PININFOFILE).c $(PININFOFILE).h: boards/$(BOARD).py scripts/build_pininfo.py scripts/pinutils.py
 	@echo ================================== Generating pin info
 	$(Q)$(PYTHON) scripts/build_pininfo.py $(BOARD) $(PININFOFILE).c $(PININFOFILE).h
 endif
@@ -867,14 +888,20 @@ ifdef LINUX # ---------------------------------------------------
 include make/targets/LINUX.make
 else ifdef EMSCRIPTEN
 include make/targets/EMSCRIPTEN.make
+else ifdef ESP32_IDF5
+include make/targets/ESP32_IDF5.make
 else ifdef ESP32_IDF4
 include make/targets/ESP32_IDF4.make
 else ifdef ESP32
 include make/targets/ESP32.make
+else ifeq ($(FAMILY),RP2XXX)
+# build rules come from make/family/RP2XXX.make (delegated to the Pico SDK)
 else ifdef ESP8266
 include make/targets/ESP8266.make
 else ifdef ESPR_EMBED
 include make/targets/EMBED.make
+else ifdef ZEPHYR
+include make/targets/ZEPHYR.make
 else # ARM/etc, so generate bin, etc ---------------------------
 include make/targets/ARM.make
 endif	    # ---------------------------------------------------
@@ -897,6 +924,7 @@ clean:
 	$(Q)rm -f $(BINDIR)/espruino_embedded.c
 	$(Q)rm -f $(BINDIR)/jstypes.h
 	$(Q)rm -f $(ROOT)/targetlibs/nrf5x_*/components/toolchain/gcc/gcc_startup_nrf5*.o $(ROOT)/targetlibs/nrf5x_*/modules/nrfx/mdk/gcc_startup_nrf5*.o $(ROOT)/targetlibs/stm32f4/lib/startup_stm32f4*.o $(ROOT)/targetlibs/stm32f1/lib/startup_stm32f10x_*.o
+	$(Q)rm -f $(BINDIR)/sdkconfig* $(BINDIR)/partitions.csv $(BINDIR)/CMakeLists.txt
 
 wrappersources:
 	$(info WRAPPERSOURCES=$(WRAPPERSOURCES))

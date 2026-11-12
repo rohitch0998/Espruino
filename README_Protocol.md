@@ -24,25 +24,67 @@ There are other codes added though:
 * 21 - Ctrl-u - delete line
 * 23 - Ctrl-w - delete word (currently just does the same as Ctrl-u)
 
-### Packet Transfer
+## Packet Transfer
 
-Added in 2v25:
+Added in 2v25. There is currently an implementation of this in https://github.com/espruino/EspruinoWebTools/blob/master/uart.js
+Compression added in 2v29
+
+
+### Control Characters
+
+Packet transfer is initiated by sending the `DOH`[ASCII 16] (Data Link Escape) control character, followed by the `SOH`[ASCII 1] (Start of Heading) control character.
+
+### Heading Data
+
+Following the initial control characters, the next two bytes signal the type and size of packet being sent. The first 3 bits contain the packet type, the following 13 represent an unsigned integer containing the byte length of the data that will follow.
+
+| Packet Type   | Hex Representation | 16 bit Binary Representation | Notes                                                                                                       |
+| ------------- | ------------------ | ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `RESPONSE`    | `0x0000`           | `000-------------`           | Response to an `EVAL` packet                                                                                |
+| `EVAL`        | `0x2000`           | `001-------------`           | Execute and return the result as `RESPONSE` packet                                                          |
+| `EVENT`       | `0x4000`           | `010-------------`           | Parse data as JSON and create `E.on('packet', ...)` event                                                   |
+| `FILE_SEND`   | `0x6000`           | `011-------------`           | Called before `DATA`, with `{fn:"filename",s:123}`                                                          |
+| `DATA`        | `0x8000`           | `100-------------`           | Sent after `FILE_SEND` with blocks of data for the file                                                     |
+| `FILE_RECV`   | `0xA000`           | `101-------------`           | Receive a file - returns a series of `DATA` packets, with a final zero length packet to end (calling data?) |
+| Length (low)  | `0x0001`           | `---0000000000001`           | Minimum packet data length, 1 byte                                                                          |
+| Length (high) | `0x1FFF`           | `---1111111111111`           | Maximum packet data length, 8191 bytes                                                                      |
+
+### Responses
+
+Following transmission of a packet (or after timeout of 1 second), there will be one of two responses that signal successful or unsuccessful packet transmission.
+
+| Type   | ASCII character | Notes                                   |
+| ------ | --------------- | --------------------------------------- |
+| `ACK`  | 6               | Acknowledged successful receipt.        |
+| `NACK` | 21              | Negative acknowledgement, unsuccessful. |
+
+### Timeouts
+
+* If a single packet takes more than 2 sec to transmit (1 sec on 2v25) Espruino will send `NAK` and will return to normal REPL mode.
+* If there's more than a 10 sec gap between DATA transfers for a file, Espruino will automatically close the transfer and the file. Subsequent DATA packets will be `NAK`ed as no file is open.
+
+### FILE_SEND packet
+
+This is arbitrary RJSON (no quotes needed on field names). It can include:
 
 ```
-DLE[16],SOH[1],TYPE|LENHI,LENLO,DATA...
+{
+  fn : "", // filename
+  s : 123, // file size
+  fs : 0/1, // if 1 (and supported) store in the FAT filesystem
+  c : 0/1, // if 1 (and 2v29+) send packets heatshrink compressed - each packet is compressed in its own right
+}
 ```
 
-If received or timed out (after 1s), will reply with an ACK[6] or NAK[21]
+### Example
 
-TYPE is:
+As an example, to create a file named `hello.txt` with the content `Hello World`, the packet is constructed as follows:
 
-```
-PT_TYPE_RESPONSE = 0x0000, // Response to an EVAL packet
-PT_TYPE_EVAL = 0x2000,  // execute and return the result as RESPONSE packet
-PT_TYPE_EVENT = 0x4000, // parse as JSON and create `E.on('packet', ...)` event
-PT_TYPE_FILE_SEND = 0x6000, // called before DATA, with {fn:"filename",s:123}
-PT_TYPE_DATA = 0x8000, // Sent after FILE_SEND with blocks of data for the file
-PT_TYPE_FILE_RECV = 0xA000 // receive a file - returns a series of PT_TYPE_DATA packets, with a final zero length packet to end
-```
-
-There is currently an implementation of this in https://github.com/espruino/EspruinoWebTools/blob/master/uart.js
+| Bytes                                                                        |                                                                                                                                                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `10 01`                                                                      | DOH, SOH, control characters                                                                                                                                                                     |
+| `60 19`                                                                      | The `FILE_SEND` packet type is sent initially, and this initial packet will be 19 bytes.                                                                                                         |
+| `7b 22 66 6e 22 3a 22 68 65 6c 6c 6f 2e 74 78 74 22 2c 22 73 22 3a 31 31 7d` | The data that follows is the 19 bytes that contain the JSON specifying which file to create, and that the file will be 11 bytes (the length of "Hello World") <br /> `{"fn":"hello.txt","s":11}` |
+| `10 01`                                                                      | DOH, SOH, to start another packet transfer                                                                                                                                                       |
+| `80 11`                                                                      | Signals this time that the packet type will be `DATA` and it will be 11 bytes.                                                                                                                   |
+| `48 65 6c 6c 6f 20 57 6f 72 6c 64`                                           | The 11 bytes of data that contain the string `Hello World`                                                                                                                                       |

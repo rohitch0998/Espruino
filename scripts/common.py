@@ -68,7 +68,7 @@ if "check_output" not in dir( subprocess ):
 #                      // hwinit = function to run on Hardware Initialisation (called once at boot time, after jshInit, before jsvInit/etc)
 #                      // init = function to run on Initialisation (eg boot/load/reset/after save/etc)
 #                      // kill = function to run on Deinitialisation (eg before save/reset/etc)
-#                      // EV_CUSTOM = Called whenever an event of type EV_CUSTOM is received (jswOnCustomEvent(event))
+#                      // EV_CUSTOM = Called whenever an event of type EV_CUSTOM is received (jswOnCustomEvent(eventFlags, data, dataLen))
 #                      // EV_xxx = Something to be called with a character in an IRQ when it is received (eg. EV_SERIAL1) (jswOnCharEvent)
 #                      // powerusage = fn(JsVar*) called with an object, and should insert fields for deviec names and estimated power usage in uA (jswGetPowerUsage)
 #         "class" : "Double",
@@ -267,7 +267,7 @@ def get_jsondata(is_for_document, parseArgs = True, boardObject = False):
             if len(targetjsondata) > 0:
               targetjsondata = targetjsondata[0]
               for key in jsondata:
-                if not key in ["type","class","name","patch"]:
+                if not key in ["type","class","name","patch","description"]:
                   print("Copying "+key+" --- "+jsondata[key])
                   targetjsondata[key] = jsondata[key]
             drop = True
@@ -452,8 +452,9 @@ def get_ifdef_description(d):
   if d=="ESPRUINOBOARD": return "'Original' Espruino boards"
   if d=="PICO": return "Espruino Pico boards"
   if d=="BANGLEJS": return "Bangle.js smartwatches"
-  if d=="BANGLEJS_F18": return "Bangle.js 1 smartwatches"
+  if d=="BANGLEJS_F18"or d=="BANGLEJS1": return "Bangle.js 1 smartwatches"
   if d=="BANGLEJS_Q3" or d=="BANGLEJS2": return "Bangle.js 2 smartwatches"
+  if d=="BANGLEJS3": return "Bangle.js 3 smartwatches"
   if d=="ESPR_EMBED": return "Embeddable Espruino C builds"
   if d=="ESPR_USE_STEPPER_TIMER": return "Built-in Stepper Motor class (2v21+)"
   if d=="ESP8266": return "ESP8266 boards running Espruino"
@@ -473,7 +474,6 @@ def get_ifdef_description(d):
   if d=="USE_SHA256": return "devices that support SHA256 (Espruino Pico, Espruino WiFi, Espruino BLE devices or Linux)"
   if d=="USE_SHA512": return "devices that support SHA512 (Espruino Pico, Espruino WiFi, Espruino BLE devices or Linux)"
   if d=="USE_CRYPTO": return "devices that support Crypto Functionality (Espruino Pico, Original, Espruino WiFi, Espruino BLE devices, Linux or ESP8266)"
-  if d=="USE_FLASHFS": return "devices with filesystem in Flash support enabled (ESP32 only)"
   if d=="USE_TERMINAL": return "devices with VT100 terminal emulation enabled (Pixl.js only)"
   if d=="USE_TELNET": return "devices with Telnet enabled (Linux, ESP8266 and ESP32)"
   if d=="USE_WIZNET": return "builds with support for WIZnet Ethernet modules built in"

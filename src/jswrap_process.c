@@ -122,9 +122,17 @@ Returns an Object containing various pre-defined variables.
 * `APP_RAM_BASE` - On nRF5x boards, this is the RAM required by the Softdevice
   *if it doesn't exactly match what was allocated*. You can use this to update
   `LD_APP_RAM_BASE` in the `BOARD.py` file
+* `SOFTDEVICE` - (on nRF5x) the hex version code of the Bluetooth Softdevice that is installed on the device (see below)
 
-For example, to get a list of built-in modules, you can use
-`process.env.MODULES.split(',')`
+To get a list of built-in modules, you can use `process.env.MODULES.split(',')`
+
+The `process.env.SOFTDEVICE` code is likely one of:
+
+| Code         | Chip     | Softdevice            |
+|--------------|----------|-----------------------|
+| 0x0091 / 145 | nRF52832 | S132 v3.1.0 (SDK12)   |
+| 0x00A9 / 169 | nRF52840 | S140 v6.0.0 (SDK15.3) |
+| 0x00B6 / 182 | nRF52840 | S140 v6.1.1 (SDK15)   |
 
 **Note:** `process.env` is not writeable - so as not to waste RAM, the contents
 are generated on demand. If you need to be able to change them, use `process.env=process.env;`
@@ -132,33 +140,38 @@ first to ensure the values stay allocated.
 */
 JsVar *jswrap_process_env() {
   JsVar *obj = jsvNewObject();
-  jsvObjectSetChildAndUnLock(obj, "VERSION", jsvNewFromString(JS_VERSION));
+  jsvObjectSetStringChild(obj, "VERSION", JS_VERSION);
 #ifdef GIT_COMMIT
-  jsvObjectSetChildAndUnLock(obj, "GIT_COMMIT", jsvNewFromString(ESPR_STRINGIFY(GIT_COMMIT)));
+  jsvObjectSetStringChild(obj, "GIT_COMMIT", ESPR_STRINGIFY(GIT_COMMIT));
 #endif
-  jsvObjectSetChildAndUnLock(obj, "BOARD", jsvNewFromString(PC_BOARD_ID));
-  jsvObjectSetChildAndUnLock(obj, "RAM", jsvNewFromInteger(RAM_TOTAL));
-  jsvObjectSetChildAndUnLock(obj, "FLASH", jsvNewFromInteger(FLASH_TOTAL));
+#ifdef EMULATED
+  jsvObjectSetBoolChild(obj, "EMULATED", true);
+#endif
+  jsvObjectSetStringChild(obj, "BOARD", PC_BOARD_ID);
+  jsvObjectSetIntChild(obj, "RAM", RAM_TOTAL);
+  jsvObjectSetIntChild(obj, "FLASH", FLASH_TOTAL);
 #ifdef SPIFLASH_LENGTH
-  jsvObjectSetChildAndUnLock(obj, "SPIFLASH", jsvNewFromInteger(SPIFLASH_LENGTH));
+  jsvObjectSetIntChild(obj, "SPIFLASH", SPIFLASH_LENGTH);
 #endif
 #ifdef PUCKJS
   jsvObjectSetChildAndUnLock(obj, "HWVERSION", jswrap_puck_getHardwareVersion());
 #endif
 #ifdef ESPR_HWVERSION
-  jsvObjectSetChildAndUnLock(obj, "HWVERSION", jsvNewFromInteger(ESPR_HWVERSION));
+  jsvObjectSetIntChild(obj, "HWVERSION", ESPR_HWVERSION);
 #endif
-  jsvObjectSetChildAndUnLock(obj, "STORAGE", jsvNewFromInteger(FLASH_SAVED_CODE_LENGTH));
+  jsvObjectSetIntChild(obj, "STORAGE", FLASH_SAVED_CODE_LENGTH);
   jsvObjectSetChildAndUnLock(obj, "SERIAL", jswrap_interface_getSerial());
   jsvObjectSetChildAndUnLock(obj, "CONSOLE", jswrap_espruino_getConsole());
-  jsvObjectSetChildAndUnLock(obj, "MODULES", jsvNewFromString(jswGetBuiltInLibraryNames()));
+  jsvObjectSetStringChild(obj, "MODULES", jswGetBuiltInLibraryNames());
 #ifndef SAVE_ON_FLASH
   // Pointer to a list of predefined exports - eventually we'll get rid of the array above
-  jsvObjectSetChildAndUnLock(obj, "EXPTR", jsvNewFromInteger((JsVarInt)(size_t)exportPtrs));
+  jsvObjectSetIntChild(obj, "EXPTR", (JsVarInt)(size_t)exportPtrs);
 #ifdef NRF5X
   extern uint32_t app_ram_base;
   if (app_ram_base)
-    jsvObjectSetChildAndUnLock(obj, "APP_RAM_BASE", jsvNewFromInteger((JsVarInt)app_ram_base));
+    jsvObjectSetIntChild(obj, "APP_RAM_BASE", (JsVarInt)app_ram_base);
+  // https://devzone.nordicsemi.com/f/nordic-q-a/1171/how-do-i-access-softdevice-version-string
+  jsvObjectSetIntChild(obj, "SOFTDEVICE", *(uint16_t*)0x0000300C);
 #endif
 #endif
   return obj;
@@ -200,6 +213,14 @@ memory usage.
 * `flash_length` : (on ARM) the amount of flash memory this firmware was built
   for (in bytes). **Note:** Some STM32 chips actually have more memory than is
   advertised.
+* `rx` : [2v30+] `{ used : int, total : int }` bytes of data that are in the
+receive buffer. This buffer is used to handle incoming character data and events
+from devices that comes in asyncronously (e.g. Bluetooth, Serial, USB, GPIO interrupts, etc).
+If the buffer is getting full, it means that JS code isn't executing fast enough to handle
+the data, and you may receive a `FIFO_FULL` error in `E.getErrorFlags()` if it gets completely full.
+* `tx` : [2v30+] `{ used : int, total : int }` bytes of data that are in the
+transmit buffer. This can be used for flow control - for example only writing to
+Bluetooth/Serial/USB when there is space in the buffer.
 
 Memory units are specified in 'blocks', which are around 16 bytes each
 (depending on your device). The actual size is available in `blocksize`. See
@@ -225,25 +246,37 @@ JsVar *jswrap_process_memory(JsVar *gc) {
     }
     unsigned int usage = jsvGetMemoryUsage() - history;
     unsigned int total = jsvGetMemoryTotal();
-    jsvObjectSetChildAndUnLock(obj, "free", jsvNewFromInteger((JsVarInt)(total-usage)));
-    jsvObjectSetChildAndUnLock(obj, "usage", jsvNewFromInteger((JsVarInt)usage));
-    jsvObjectSetChildAndUnLock(obj, "total", jsvNewFromInteger((JsVarInt)total));
-    jsvObjectSetChildAndUnLock(obj, "history", jsvNewFromInteger((JsVarInt)history));
+    jsvObjectSetIntChild(obj, "free", (JsVarInt)(total-usage));
+    jsvObjectSetIntChild(obj, "usage", (JsVarInt)usage);
+    jsvObjectSetIntChild(obj, "total", (JsVarInt)total);
+    jsvObjectSetIntChild(obj, "history", (JsVarInt)history);
     if (varsGCd>=0) {
-      jsvObjectSetChildAndUnLock(obj, "gc", jsvNewFromInteger((JsVarInt)varsGCd));
-      jsvObjectSetChildAndUnLock(obj, "gctime", jsvNewFromFloat(jshGetMillisecondsFromTime(time2-time1)));
+      jsvObjectSetIntChild(obj, "gc", (JsVarInt)varsGCd);
+      jsvObjectSetFloatChild(obj, "gctime", jshGetMillisecondsFromTime(time2-time1));
     }
-    jsvObjectSetChildAndUnLock(obj, "blocksize", jsvNewFromInteger(sizeof(JsVar)));
-
+    jsvObjectSetIntChild(obj, "blocksize", sizeof(JsVar));
+#ifndef SAVE_ON_FLASH
+    JsVar *rx = jsvNewObject();
+    jsvObjectSetIntChild(rx, "used", jshGetEventsUsed());
+    jsvObjectSetIntChild(rx, "total", IOBUFFERMASK+1);
+    jsvObjectSetChildAndUnLock(obj, "rx", rx);
+    JsVar *tx = jsvNewObject();
+    jsvObjectSetIntChild(tx, "used", jshGetTransmitBufferUsage());
+    jsvObjectSetIntChild(tx, "total", TXBUFFERMASK+1);
+    jsvObjectSetChildAndUnLock(obj, "tx", tx);
+#endif
 #ifdef ARM
     extern uint32_t LINKER_END_VAR; // end of ram used (variables) - should be 'void', but 'int' avoids warnings
     extern uint32_t LINKER_ETEXT_VAR; // end of flash text (binary) section - should be 'void', but 'int' avoids warnings
-    jsvObjectSetChildAndUnLock(obj, "stackEndAddress", jsvNewFromInteger((JsVarInt)(unsigned int)&LINKER_END_VAR));
-    jsvObjectSetChildAndUnLock(obj, "stackFree", jsvNewFromInteger((JsVarInt)(unsigned int)jsuGetFreeStack()));
-    jsvObjectSetChildAndUnLock(obj, "flash_start", jsvNewFromInteger((JsVarInt)FLASH_START));
-    jsvObjectSetChildAndUnLock(obj, "flash_binary_end", jsvNewFromInteger((JsVarInt)(unsigned int)&LINKER_ETEXT_VAR));
-    jsvObjectSetChildAndUnLock(obj, "flash_code_start", jsvNewFromInteger((JsVarInt)FLASH_SAVED_CODE_START));
-    jsvObjectSetChildAndUnLock(obj, "flash_length", jsvNewFromInteger((JsVarInt)FLASH_TOTAL));
+    jsvObjectSetIntChild(obj, "stackEndAddress", (JsVarInt)(unsigned int)&LINKER_END_VAR);
+    jsvObjectSetIntChild(obj, "flash_start", (JsVarInt)FLASH_START);
+    jsvObjectSetIntChild(obj, "flash_binary_end", (JsVarInt)(unsigned int)&LINKER_ETEXT_VAR);
+    jsvObjectSetIntChild(obj, "flash_code_start", (JsVarInt)FLASH_SAVED_CODE_START);
+    jsvObjectSetIntChild(obj, "flash_length", (JsVarInt)FLASH_TOTAL);
+#endif
+#if defined(ESP32) || defined(ARM)
+    unsigned int stack = (unsigned int)jsuGetFreeStack();
+    if (stack!=0xFFFFFFFF) jsvObjectSetIntChild(obj, "stackFree", stack);
 #endif
   }
   return obj;

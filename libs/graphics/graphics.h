@@ -115,6 +115,7 @@ typedef struct {
   unsigned short fontSize; ///< See JSGRAPHICS_FONTSIZE_ constants
   short cursorX, cursorY; ///< current cursor positions
 #ifndef SAVE_ON_FLASH
+  short offsetX, offsetY; ///< offset to apply to all coordinates
   unsigned char fontAlignX : 2;
   unsigned char fontAlignY : 2;
   unsigned char fontRotate : 2;
@@ -152,6 +153,8 @@ typedef struct {
   JsGraphicsThemeColor bg2; ///< Accented Background
   JsGraphicsThemeColor fgH; ///< Foreground when highlighted
   JsGraphicsThemeColor bgH; ///< Background when highlighted
+  JsGraphicsThemeColor fgW; ///< Widget foreground colour
+  JsGraphicsThemeColor bgW; ///< Widget background colour
   bool dark; ///< Is background dark (eg. foreground should be a light colour)
 } PACKED_FLAGS JsGraphicsTheme;
 
@@ -217,6 +220,8 @@ void graphicsFallbackFillRect(JsGraphics *gfx, int x1, int y1, int x2, int y2, u
 void graphicsFillRectDevice(JsGraphics *gfx, int x1, int y1, int x2, int y2, unsigned int col); // fillrect using device coordinates
 void graphicsFallbackScroll(JsGraphics *gfx, int xdir, int ydir, int x1, int y1, int x2, int y2);
 void graphicsDrawRect(JsGraphics *gfx, int x1, int y1, int x2, int y2);
+/// Draws 4 corners of an ellipse with rx/ry, left corners at posX1, right at posX2 (same for top/bottom). Assumes pre-transformed coordinates
+void graphicsDrawEllipseInternal(JsGraphics *gfx, int posX1, int posY1, int posX2, int posY2, int rx, int ry);
 void graphicsDrawEllipse(JsGraphics *gfx, int x, int y, int x2, int y2);
 void graphicsFillEllipse(JsGraphics *gfx, int x, int y, int x2, int y2);
 void graphicsFillAnnulus(JsGraphics *gfx, int x, int y, int r1, int r2, unsigned short quadrants);
@@ -227,6 +232,7 @@ void graphicsFillPoly(JsGraphics *gfx, int points, short *vertices); ///< each p
 /// Scroll the graphics device (in user coords). X>0 = to right, Y >0 = down
 void graphicsScroll(JsGraphics *gfx, int xdir, int ydir);
 
+void graphicsDrawString(JsGraphics *gfx, int x1, int y1, const char *str); ///< Low level simple string draw
 void graphicsSplash(JsGraphics *gfx); ///< splash screen
 
 void graphicsIdle(); ///< called when idling

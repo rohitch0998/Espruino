@@ -94,6 +94,8 @@ else: # NOT LINUX
     flash_page_size = 2*1024
   if board.chip["family"]=="STM32F4":
     flash_page_size = 128*1024
+  if board.chip["family"]=="STM32F7":
+    flash_page_size = 128*1024
   if board.chip["family"]=="NRF51":
     flash_page_size = 1024
   if board.chip["family"]=="NRF52":
@@ -102,6 +104,8 @@ else: # NOT LINUX
     flash_page_size = 4*1024
   if board.chip["family"]=="STM32L4":
     flash_page_size = 128*1024
+  if board.chip["family"]=="RP2XXX":
+    flash_page_size = 4*1024
   flash_saved_code_pages = round((flash_needed+flash_page_size-1)/flash_page_size + 0.5) #Needs to be a full page, so we're rounding up
   # F4 has different page sizes in different places
   total_flash = board.chip["flash"]*1024
@@ -214,6 +218,9 @@ elif board.chip["family"]=="STM32L4":
   codeOut('#include "stm32l4xx_ll_bus.h"')
   codeOut('#include "stm32l4xx_ll_rcc.h"')
   codeOut('#include "stm32l4xx_ll_adc.h"')
+elif board.chip["family"]=="STM32F7":
+  board.chip["class"]="STM32_LL"
+  codeOut('#include "stm32f7xx.h"')
 elif board.chip["family"]=="NRF51":
   board.chip["class"]="NRF51"
   linker_etext_var = "__etext";
@@ -236,14 +243,21 @@ elif board.chip["family"]=="AVR":
   board.chip["class"]="AVR"
 elif board.chip["family"]=="ESP8266":
   board.chip["class"]="ESP8266"
-elif board.chip["family"]=="ESP32" or board.chip["family"]=="ESP32_IDF4":
+elif board.chip["family"]=="ESP32" or board.chip["family"]=="ESP32_IDF4" or board.chip["family"]=="ESP32_IDF5":
   board.chip["class"]="ESP32"
   exti_count = 40
+elif board.chip["family"]=="RP2XXX":
+  board.chip["class"]="RP2XXX"
+  linker_etext_var = "__flash_binary_end" # linker symbols come from the Pico SDK linker script
+  exti_count = 30
+  codeOut("void NVIC_SystemReset(void);")
 elif board.chip["family"]=="SAMD":
   board.chip["class"]="SAMD"
   codeOut('#include "targetlibs/samd/include/due_sam3x.init.h"')
 elif board.chip["family"]=="EMBED":
   board.chip["class"]="EMBED"
+elif board.chip["family"]=="ZEPHYR":
+  board.chip["class"]="ZEPHYR"
 else:
   die('Unknown chip family '+board.chip["family"])
 
@@ -297,8 +311,10 @@ else:
     codeOut("#define FLASH_PAGE_SIZE                 "+str(flash_page_size))
   if board.chip["family"]=="ESP8266":
     codeOut("#define FLASH_START                     "+hex(0x0))
-  elif board.chip["family"]=="NRF52" or board.chip["family"]=="NRF51":
+  elif board.chip["family"]=="NRF52" or board.chip["family"]=="NRF51" or board.chip["family"]=="ZEPHYR":
     codeOut("#define FLASH_START                     "+hex(0x0))
+  elif board.chip["family"]=="RP2XXX":
+    codeOut("#define FLASH_START                     "+hex(0x10000000)) # flash is memory-mapped (XIP) here on both
   elif board.chip["class"]=="EFM32":
     codeOut("#define FLASH_START                     FLASH_BASE // FLASH_BASE defined in em_device.h")
   else:
@@ -341,21 +357,21 @@ xoff_thresh = 6 # how full (out of 8) is buffer when we sent the XOFF flow contr
 xon_thresh = 3 # how full (out of 8) is buffer when we sent the XON flow control char to say 'go'
 
 if LINUX:
-  bufferSizeIO = 256
+  bufferSizeIO = 1024
   bufferSizeTX = 256
   bufferSizeTimer = 16
 elif EMSCRIPTEN:
-  bufferSizeIO = 256
+  bufferSizeIO = 1024
   bufferSizeTX = 256
   bufferSizeTimer = 16
 else:
   # IO buffer - for received chars, setWatch, etc
-  bufferSizeIO = 64
-  if board.chip["ram"]>=20: bufferSizeIO = 128
-  if board.chip["ram"]>=96: bufferSizeIO = 256
+  bufferSizeIO = 256
+  if board.chip["ram"]>=20: bufferSizeIO = 512
+  if board.chip["ram"]>=96: bufferSizeIO = 1024
   # NRF52 needs this as Bluetooth traffic is funnelled through the buffer
   if board.chip["family"]=="NRF52":
-    bufferSizeIO = 256
+    bufferSizeIO = 1024
     # we often use increased MTUs and even with a big buffer these mean we need to leave
     # a lot of space when we send XOFF (due to delay in response from sender)
     xoff_thresh = 3
@@ -376,8 +392,8 @@ if 'xoff_thresh' in board.info:
 if 'xon_thresh' in board.info:
   xon_thresh = board.info['xon_thresh']
 
-codeOut("#define IOBUFFERMASK "+str(bufferSizeIO-1)+" // (max 65535) amount of items in event buffer - events take 5 bytes each")
-codeOut("#define TXBUFFERMASK "+str(bufferSizeTX-1)+" // (max 255) amount of items in the transmit buffer - 2 bytes each")
+codeOut("#define IOBUFFERMASK "+str(bufferSizeIO-1)+" // (max 65535, 2^n-1) amount of items in event buffer - each event uses 2+dataLen bytes")
+codeOut("#define TXBUFFERMASK "+str(bufferSizeTX-1)+" // (max 255, 2^n-1) amount of items in the transmit buffer - 2 bytes each")
 codeOut("#define UTILTIMERTASK_TASKS ("+str(bufferSizeTimer)+") // Must be power of 2 - and max 256")
 
 codeOut("");
@@ -429,10 +445,11 @@ if "LCD" in board.devices:
       codeOutDevicePin("LCD", "pin_rs", "LCD_FSMC_RS")
     if "pin_reset" in board.devices["LCD"]:
       codeOutDevicePin("LCD", "pin_reset", "LCD_RESET")
-  if board.devices["LCD"]["controller"]=="ssd1306" or board.devices["LCD"]["controller"]=="st7567" or board.devices["LCD"]["controller"]=="st7789v" or board.devices["LCD"]["controller"]=="st7735" or board.devices["LCD"]["controller"]=="gc9a01":
+  if "pin_rst" in board.devices["LCD"]:
     codeOutDevicePin("LCD", "pin_rst", "LCD_SPI_RST")
-  if board.devices["LCD"]["controller"]=="LPM013M126":
+  if "pin_disp" in board.devices["LCD"]:
     codeOutDevicePin("LCD", "pin_disp", "LCD_DISP")
+  if "pin_extcomin" in board.devices["LCD"]:
     codeOutDevicePin("LCD", "pin_extcomin", "LCD_EXTCOMIN")
   if "pin_cs" in board.devices["LCD"]:
     codeOutDevicePin("LCD", "pin_cs", "LCD_SPI_CS")
@@ -444,6 +461,8 @@ if "LCD" in board.devices:
     codeOutDevicePin("LCD", "pin_sck", "LCD_SPI_SCK")
   if "pin_dc" in board.devices["LCD"]:
     codeOutDevicePin("LCD", "pin_dc", "LCD_SPI_DC")
+  if "pin_irq" in board.devices["LCD"]:
+    codeOutDevicePin("LCD", "pin_irq", "LCD_SPI_IRQ")
   if "spi_device" in board.devices["LCD"]:
     codeOut("#define LCD_SPI_DEVICE "+board.devices["LCD"]["spi_device"])
   if "pin_tearing" in board.devices["LCD"]:
@@ -474,6 +493,16 @@ if "SD" in board.devices:
   if "pin_d3" in board.devices["SD"]: codeOutDevicePin("SD", "pin_d3", "SD_D3_PIN")
   if "pin_cmd" in board.devices["SD"]: codeOutDevicePin("SD", "pin_cmd", "SD_CMD_PIN")
 
+
+if "DAC" in board.devices:
+  if "pin_scl" in board.devices["DAC"]: codeOutDevicePin("DAC", "pin_scl", "DAC_SCL_PIN")
+  if "pin_sda" in board.devices["DAC"]: codeOutDevicePin("DAC", "pin_sda", "DAC_SDA_PIN")
+  if "pin_lrck" in board.devices["DAC"]: codeOutDevicePin("DAC", "pin_lrck", "DAC_LRCK_PIN")
+  if "pin_sclk" in board.devices["DAC"]: codeOutDevicePin("DAC", "pin_sclk", "DAC_SCLK_PIN")
+  if "pin_mclk" in board.devices["DAC"]: codeOutDevicePin("DAC", "pin_mclk", "DAC_MCLK_PIN")
+  if "pin_miso" in board.devices["DAC"]: codeOutDevicePin("DAC", "pin_miso", "DAC_MISO_PIN")
+  if "pin_mosi" in board.devices["DAC"]: codeOutDevicePin("DAC", "pin_mosi", "DAC_MOSI_PIN")
+
 if "IR" in board.devices:
   codeOutDevicePin("IR", "pin_anode", "IR_ANODE_PIN")
   codeOutDevicePin("IR", "pin_cathode", "IR_CATHODE_PIN")
@@ -487,6 +516,9 @@ if "VIBRATE" in board.devices:
 
 if "SPEAKER" in board.devices:
   codeOutDevicePins("SPEAKER", "SPEAKER")
+
+if "MIC" in board.devices:
+  codeOutDevicePins("MIC", "MIC")
 
 if "HEARTRATE" in board.devices:
   codeOutDevicePins("HEARTRATE", "HEARTRATE")
@@ -527,6 +559,7 @@ if "PRESSURE" in board.devices:
 
 if "TOUCH" in board.devices:
   codeOut("#define TOUCH_DEVICE \""+board.devices["TOUCH"]["device"].upper()+"\"")
+  codeOut("#define TOUCH_DEVICE_"+board.devices["TOUCH"]["device"].upper()+" 1")
   if "addr" in board.devices["TOUCH"]:
     codeOut("#define TOUCH_ADDR "+str(board.devices["TOUCH"]["addr"]))
   codeOutDevicePins("TOUCH", "TOUCH")
@@ -550,6 +583,9 @@ if "SPIFLASH" in board.devices:
   if "memmap_base" in board.devices["SPIFLASH"]:
     codeOut("#define SPIFLASH_BASE "+str(board.devices["SPIFLASH"]["memmap_base"])+"UL")
   codeOutDevicePins("SPIFLASH", "SPIFLASH")
+
+if "MISC" in board.devices:
+  codeOutDevicePins("MISC", "MISC")
 
 for device in pinutils.OTHER_DEVICES:
   if device in board.devices:

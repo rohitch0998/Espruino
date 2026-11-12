@@ -22,25 +22,21 @@ Works:
 * On the whole functions that can't be JITed will produce a message on the console and will be treated as normal functions.
 * Short-circuit execution (`&&`/`||`)
 * Array `[]` and Object `{}` declarations
+* `new X(...)`
 
 Doesn't work:
 
-* `new X(...)`
-* Everything not mentioned under `Works`
+* Everything not mentioned under `Works`!
 
 Performance:
 
 * When calling a JIT function, we use existing FunctionCall code to set up args and an execution scope (so args can be passed in)
+* Some special cases (calling native functions without args) currently call directly, which is fast
+* Built-in global functions are called directly which is a ton faster
 * Variables are referenced at the start just once and stored on the stack
-  * We could also maybe extend it to allow caching of constant field accesses, for instance 'console.log'
-* Built-in global functions are called directly which is a ton faster, but methods like 'console.log' are not currently
-* Peephole optimisation could still be added (eg. removing `push r0, pop r0`) but this is the least of our worries
-* Stuff is in place to allow ints to be stored on the stack and converted when needed. This could allow us to keep some vars as ints, but control flow makes this hard
+* Peephole optimisation for common issues (eg. removing `push r0, pop r0`) are now added
 * When a function is called we load up the address as a 32 bit literal each time. We could maybe have a constant pool or local stub functions?
-
-Possible improvements:
-
-* We always output a `return undefined` even if the function has already returned
+* Ints/bools/etc are now stored on the stack and converted when needed. This could allow us to keep some vars as ints, but control flow makes this hard
 
 
 ## Testing
@@ -216,6 +212,14 @@ jit()=="1,2,3,Hello,World"
 
 function jit() {'jit';return {a:42,b:10,12:5};}
 JSON.stringify(jit()) == '{"a":42,"b":10,"12":5}'
+
+function jit() { "jit" return new Array(1,2,3,4); } 
+jit()=="1,2,3,4"
+
+function A() { this.foo=42; } 
+function jit() { "jit" return new A(); } 
+JSON.stringify(jit()) == "{\"foo\":42}"
+
 
 E.setFlags({jitDebug:1});
 function jit() {'jit';return 0&&2;}

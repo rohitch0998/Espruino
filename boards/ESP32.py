@@ -17,7 +17,7 @@
 
 # A Note about the 'variables' parameter on ESP32 Builds
 # ------------------------------------------------------
-# 
+#
 # For the ESP32 build, the number of JsVars is governed by two factors:
 #     * Available memory
 #     * Maximum number of JsVars for the used JsVar format
@@ -50,8 +50,8 @@ info = {
  'espruino_page_link'       : 'ESP32',
  'default_console'          : "EV_SERIAL1",
  'default_console_baudrate' : "115200",
- 'variables'                : 16383, # See note above 
- 'io_buffer_size'           : 1024, # How big is the input buffer (in 4 byte words). Default is 256, but this makes us less likely to drop data
+ 'variables'                : 16383, # See note above
+ 'io_buffer_size'           : 4096, # How big is the input buffer (in bytes). Default on nRF52 is 1024
  'binary_name'              : 'espruino_%v_esp32.bin',
  'build' : {
    'optimizeflags' : '-Og',
@@ -64,8 +64,7 @@ info = {
      'TELNET',
      'NEOPIXEL',
      'FILESYSTEM',
-     'FLASHFS',
-     'BLUETOOTH'	 
+     'BLUETOOTH'
    ],
    'makefile' : [
      'DEFINES+=-DESP_PLATFORM -DESP32=1',
@@ -92,7 +91,7 @@ chip = {
   'saved_code' : {
     'address' : 0x320000,
     'page_size' : 4096,
-    'pages' : 64,
+    'pages' : 224, # 896kb - see partitions_espruino.csv
     'flash_available' : 1344, # firmware can be up to this size - see partitions_espruino.csv
   },
 };
@@ -184,11 +183,13 @@ def get_pins():
 
   pinutils.findpin(pins, "PD0", True)["functions"]["NEGATED"]=0; # BTN1 negate
 
-  pinutils.findpin(pins, "PD10", True)["functions"]["USART1_TX"]=0; # doesn't match jshardwareUart?
-  pinutils.findpin(pins, "PD32", True)["functions"]["USART1_RX"]=0; # doesn't match jshardwareUart?
+  pinutils.findpin(pins, "PD1", True)["functions"]["USART1_TX"]=0;
+  pinutils.findpin(pins, "PD3", True)["functions"]["USART1_RX"]=0;
+  pinutils.findpin(pins, "PD4", True)["functions"]["USART2_TX"]=0; # default is 10 but can't use this as it's on SPI flash - match what jshardwareUart used
+  pinutils.findpin(pins, "PD5", True)["functions"]["USART2_RX"]=0; # default is 9 but can't use this as it's on SPI flash
   pinutils.findpin(pins, "PD16", True)["functions"]["USART3_RX"]=0;
-  pinutils.findpin(pins, "PD17", True)["functions"]["USART3_TX"]=0; 
-  
+  pinutils.findpin(pins, "PD17", True)["functions"]["USART3_TX"]=0;
+
   pinutils.findpin(pins, "PD16", True)["functions"]["I2C2_SCL"]=1;  # added for issue #2589 fix
   pinutils.findpin(pins, "PD17", True)["functions"]["I2C2_SDA"]=1;  # added for issue #2589 fix
   pinutils.findpin(pins, "PD22", True)["functions"]["I2C1_SCL"]=0; # SCL moved from P21 for issue #2589
@@ -196,7 +197,7 @@ def get_pins():
 
 # These SPI Pin defs used in jshSPISetup as of issue #2601
 # see esp-idf-4 /components/soc/esp32/include/soc/spi_pins.h
-  pinutils.findpin(pins, "PD14", True)["functions"]["SPI1_SCK"]=0; 
+  pinutils.findpin(pins, "PD14", True)["functions"]["SPI1_SCK"]=0;
   pinutils.findpin(pins, "PD12", True)["functions"]["SPI1_MISO"]=0;
   pinutils.findpin(pins, "PD13", True)["functions"]["SPI1_MOSI"]=0;
   pinutils.findpin(pins, "PD18", True)["functions"]["SPI2_SCK"]=0;

@@ -245,6 +245,7 @@ does not need to be changed.
 The options properties may contain:
 
 * `password` - Password string to be used to access the network.
+* `allChannels` - [2v30+ ESP32] if true, scans all Wifi channels for the AP (the default is a 'fast scan')
 * `dnsServers` (array of String) - An array of up to two DNS servers in dotted
   decimal format string.
 * `channel` - Wifi channel of the access point (integer, typ 0..14, 0 means any
@@ -271,7 +272,8 @@ Notes:
   "name"     : "scan",
   "generate" : "jswrap_wifi_scan",
   "params"   : [
-    ["callback", "JsVar", "A `callback(err, ap_list)` function to be called back on completion. `err==null` and `ap_list` is an array on success, or `err` is an error string and `ap_list` is undefined on failure."]
+    ["callback", "JsVar", "A `callback(err, ap_list)` function to be called back on completion. `err==null` and `ap_list` is an array on success, or `err` is an error string and `ap_list` is undefined on failure."],
+    ["options", "JsVar", "[2v30+ ESP32] Optional options for scanning `{ passive: bool }`"]
   ]
 }
 Perform a scan for access points. This will enable the station mode if it is not
@@ -382,10 +384,11 @@ available are:
 
 * `phy` - Modulation standard to allow: `11b`, `11g`, `11n` (the esp8266 docs
   are not very clear, but it is assumed that 11n means b/g/n).
-* `powersave` - Power saving mode: `none` (radio is on all the time), `ps-poll`
-  (radio is off between beacons as determined by the access point's DTIM
-  setting). Note that in 'ap' and 'sta+ap' modes the radio is always on, i.e.,
-  no power saving is possible.
+* `powersave` - Power saving mode. Note that in 'ap' and 'sta+ap' modes the radio is always on, i.e.,  no power saving is possible.
+  * `none` (radio is on all the time),
+  * `ps-poll` (radio is off between beacons as determined by the access point's DTIM setting).
+  * `min`
+  * `max`
 
 Note: esp8266 SDK programmers may be missing an "opmode" option to set the
 sta/ap/sta+ap operation mode. Please use connect/scan/disconnect/startAP/stopAP,
@@ -584,7 +587,7 @@ includes an announcement for the "espruino" service.
   "class"    : "Wifi",
   "name"     : "setSNTP",
   "generate" : "jswrap_wifi_setSNTP",
-  "#if" : "defined(ESP8266) || defined(ESP32)",  
+  "#if" : "defined(ESP8266) || defined(ESP32)",
   "params"   : [
     ["server", "JsVar", "The NTP server to query, for example, `us.pool.ntp.org`"],
     ["tz_offset", "JsVar", "Local time zone offset in the range -11..13."]

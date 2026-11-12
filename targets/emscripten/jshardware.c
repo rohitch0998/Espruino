@@ -41,12 +41,12 @@ EM_JS(void, emscripten_memcpy_js, (uint8_t* dest, uint8_t* src, size_t numBytes)
 });
 // ----------------------------------------------------------------------------
 
-Pin eventFlagsToPin[16];
+Pin eventFlagsToPin[ESPR_EXTI_COUNT];
 int timeToSleep = -1;
 bool firstIdle = true;
 
 void jshInit() {
-  for (int i=0;i<16;i++)
+  for (int i=0;i<ESPR_EXTI_COUNT;i++)
     eventFlagsToPin[i] = PIN_UNDEFINED;
   jshInitDevices();
   firstIdle = true;
@@ -77,7 +77,7 @@ void jshBusyIdle() {
 
 int jshGetSerialNumber(unsigned char *data, int maxChars) {
   long initialSerial = 0;
-  long long serial = 0xDEADDEADDEADDEADL; 
+  long long serial = 0xDEADDEADDEADDEADL;
   memcpy(&data[0], &initialSerial, 4);
   memcpy(&data[4], &serial, 8);
   return 12;
@@ -151,7 +151,7 @@ int jshPinAnalogFast(Pin pin) {
   return 0;
 }
 
-JshPinFunction jshPinAnalogOutput(Pin pin, JsVarFloat value, JsVarFloat freq, JshAnalogOutputFlags flags) { // if freq<=0, 
+JshPinFunction jshPinAnalogOutput(Pin pin, JsVarFloat value, JsVarFloat freq, JshAnalogOutputFlags flags) { // if freq<=0,
   return JSH_NOTHING;
 }
 
@@ -160,7 +160,7 @@ bool jshCanWatch(Pin pin) {
 }
 
 IOEventFlags jshGetEventFlagsForPin(Pin pin) {
-  for (int i=0;i<16;i++)
+  for (int i=0;i<ESPR_EXTI_COUNT;i++)
     if (eventFlagsToPin[i]==pin)
       return EV_EXTI0+i;
   return EV_NONE;
@@ -168,13 +168,13 @@ IOEventFlags jshGetEventFlagsForPin(Pin pin) {
 
 IOEventFlags jshPinWatch(Pin pin, bool shouldWatch, JshPinWatchFlags flags) {
   if (shouldWatch)
-    for (int i=0;i<16;i++)
+    for (int i=0;i<ESPR_EXTI_COUNT;i++)
       if (eventFlagsToPin[i]==PIN_UNDEFINED) {
         eventFlagsToPin[i]=pin;
         return EV_EXTI0+i;
       }
   else {
-    for (int i=0;i<16;i++)
+    for (int i=0;i<ESPR_EXTI_COUNT;i++)
       if (eventFlagsToPin[i]==pin)
         eventFlagsToPin[i]=PIN_UNDEFINED;
   }
@@ -185,8 +185,8 @@ bool jshGetWatchedPinState(IOEventFlags device) {
   return jshPinGetValue(eventFlagsToPin[device-EV_EXTI0]);
 }
 
-bool jshIsEventForPin(IOEvent *event, Pin pin) {
-  return IOEVENTFLAGS_GETTYPE(event->flags) == jshGetEventFlagsForPin(pin);
+bool jshIsEventForPin(IOEventFlags eventFlags, Pin pin) {
+  return IOEVENTFLAGS_GETTYPE(eventFlags) == jshGetEventFlagsForPin(pin);
 }
 
 void jshUSARTSetup(IOEventFlags device, JshUSARTInfo *inf) {

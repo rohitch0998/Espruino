@@ -50,10 +50,10 @@ import pinutils;
 info = {
  'name'                     : "CURIO",
  'espruino_page_link'       : 'Curio',
- 'default_console'          : "EV_SERIAL1",
+ 'default_console'          : "EV_USBSERIAL", # USB only no serial, see ESPR_USE_USB_SERIAL_JTAG
  'default_console_baudrate' : "115200",
  'variables'                : 16383, # See note above
- 'io_buffer_size'           : 1024, # How big is the input buffer (in 4 byte words). Default is 256, but this makes us less likely to drop data
+ 'io_buffer_size'           : 4096, # How big is the input buffer (in bytes). Default on nRF52 is 1024
  'binary_name'              : 'espruino_%v_curio.bin',
  'build' : {
    'optimizeflags' : '-Og',
@@ -65,7 +65,6 @@ info = {
      'TLS',
 #     'TELNET',
 #     'FILESYSTEM',
-#     'FLASHFS',
      'BLUETOOTH',
      'NEOPIXEL'
    ],
@@ -74,9 +73,9 @@ info = {
      'DEFINES+=-DESP_STACK_SIZE=25000',
      'DEFINES+=-DJSVAR_MALLOC', # Allocate space for variables at jsvInit time
      'DEFINES+=-DUSE_FONT_6X8',
-     'DEFINES+=-DUSB_CDC', # Because now we have to explicitly request it
+     'DEFINES+=-DESPR_USE_USB_SERIAL_JTAG -DUSB', # Use on-chip USB. See ESPR_USE_USB_SERIAL_JTAG in README_BuildProcess.md
      'ESP32_FLASH_MAX=1572864',
-#     'DEFINES+=-DBLUETOOTH_NAME_PREFIX=\'\"Curio\"\'', # string passing in IDF4 makefile is broken
+     'DEFINES+=-DBLUETOOTH_NAME_PREFIX="Curio"', # string passing in IDF4 makefile is broken
      'INCLUDE += -I$(ROOT)/libs/misc',
      'WRAPPERSOURCES += libs/misc/jswrap_curio.c',
      'WRAPPERSOURCES += libs/joltjs/jswrap_qwiic.c',
@@ -100,7 +99,7 @@ chip = {
   'saved_code' : {
     'address' : 0x320000,
     'page_size' : 4096,
-    'pages' : 64,
+    'pages' : 224, # 896kb - see partitions_espruino.csv
     'flash_available' : 1344, # firmware can be up to this size - see partitions_espruino.csv
   },
 };
@@ -161,21 +160,21 @@ def get_pins():
   # pinutils.findpin(pins, "PD5", True)["functions"]["ADC2_IN0"]=0;
 #  pinutils.findpin(pins, "PD8", True)["functions"]["NEGATED"]=0; # LED negated - but ESP32 port ignores negation
   # D12-D17 are SPI (internal SPI) - not sure they should even be exposed??
-  
+
   pinutils.findpin(pins, "PD18", True)["functions"]["USB"]=0; # D-
   pinutils.findpin(pins, "PD19", True)["functions"]["USB"]=0; # D+
   pinutils.findpin(pins, "PD20", True)["functions"]["USART1_RX"]=0;
   pinutils.findpin(pins, "PD21", True)["functions"]["USART1_TX"]=0;
   pinutils.findpin(pins, "PD9", True)["functions"]["I2C1_SCL"]=0; # added for issue #2589 fix
   pinutils.findpin(pins, "PD8", True)["functions"]["I2C1_SDA"]=0; # added for issue #2589 fix
- 
-  # SPI added for issue #2601 
+
+  # SPI added for issue #2601
   # See esp-idf-4 /components/soc/esp32c3/include/soc/soc_caps.h
   pinutils.findpin(pins, "PD6", True)["functions"]["SPI1_SCK"]=0;
   pinutils.findpin(pins, "PD2", True)["functions"]["SPI1_MISO"]=0;
   pinutils.findpin(pins, "PD7", True)["functions"]["SPI1_MOSI"]=0;
 
- 
+
 
   # everything is non-5v tolerant
   for pin in pins:

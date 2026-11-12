@@ -25,6 +25,7 @@
 #include "jsflags.h"
 #include "jstimer.h"
 #include "jswrap_bluetooth.h"
+#include "jswrap_arraybuffer.h"
 #include "nrf_gpio.h"
 #include "nrf_delay.h"
 #include "nrf5x_utils.h"
@@ -59,6 +60,7 @@ const Pin PUCK_IO_PINS[] = {1,2,4,6,7,8,23,24,28,29,30,31};
 
 bool mag_enabled = false; //< Has the magnetometer been turned on?
 uint16_t mag_power; // est mag power in uA
+int mag_milliHz; // last set magnetometer speed
 int16_t mag_reading[3];  //< magnetometer xyz reading
 //int mag_zero[3]; //< magnetometer 'zero' reading, only for Puck 2.1 right now
 volatile bool mag_data_ready = false;
@@ -107,9 +109,9 @@ void jswrap_puck_notAvailableException(const char *hardware) {
 JsVar *to_xyz(int16_t d[3], double scale) {
   JsVar *obj = jsvNewObject();
   if (!obj) return 0;
-  jsvObjectSetChildAndUnLock(obj,"x",jsvNewFromFloat(d[0]*scale));
-  jsvObjectSetChildAndUnLock(obj,"y",jsvNewFromFloat(d[1]*scale));
-  jsvObjectSetChildAndUnLock(obj,"z",jsvNewFromFloat(d[2]*scale));
+  jsvObjectSetFloatChild(obj,"x", d[0]*scale);
+  jsvObjectSetFloatChild(obj,"y", d[1]*scale);
+  jsvObjectSetFloatChild(obj,"z", d[2]*scale);
   return obj;
 }
 
@@ -253,10 +255,7 @@ void mag_rd(int addr, unsigned char *data, int cnt) {
     wr(MAG_PIN_SDA, 1);
     wr(MAG_PIN_SCL, 1);
   } else {
-    unsigned char buf[1];
-    buf[0] = addr;
-    jsi2cWrite(&i2cMag, iaddr, 1, buf, false);
-    jsi2cRead(&i2cMag, iaddr, cnt, data, true);
+    jsi2cReadReg(&i2cMag, iaddr, addr, cnt, data);
   }
 }
 
@@ -278,6 +277,7 @@ void mag_pin_on() {
 
 // Turn magnetometer on and configure. If instant=true we take a reading right away
 bool mag_on(int milliHz, bool instant) {
+  mag_milliHz = milliHz;
   //jsiConsolePrintf("mag_on\n");
   mag_pin_on();
   mag_power = 0;
@@ -450,7 +450,7 @@ void mag_read() {
 
 // Get temperature, shifted left 8 bits
 int mag_read_temp() {
-  unsigned char buf[2];
+  unsigned char buf[6];
   if (puckVersion == PUCKJS_1V0) { // MAG3110
     mag_rd(0x0F, buf, 1); // DIE_TEMP
     return ((int8_t)buf[0])<<8;
@@ -460,6 +460,7 @@ int mag_read_temp() {
     // 20 degree offset based on tests here
     return (int)(t >> 3) + (20 << 8);
   } else if (puckVersion == PUCKJS_2V1) { // MMC5603NJ
+    mag_wr(0x1D, 0); // turn off continuous mode
     mag_wr(0x1B, 0x02); // Take temperature measurement
     // Wait for completion
     int timeout = 100;
@@ -467,8 +468,9 @@ int mag_read_temp() {
       mag_rd(0x18, buf, 1); // Status
     } while (!(buf[0]&0x80) && --timeout); // check for Meas_t_done
     // get measurement
-    mag_rd(0x07, buf, 1); // Status
-    return (buf[0] - 75) << 8;
+    mag_rd(0x09, buf, 1); // Temperature
+    mag_on(mag_milliHz, true); // re-enable magnetometer continuous mode
+    return (buf[0] * 205 /* 256*0.8 */) - (75 << 8);
   } else
     return -1;
 }
@@ -555,9 +557,7 @@ bool accel_on(int milliHz) {
 void accel_read() {
   unsigned char buf[12];
   // FIXME: If just the accelerometer is on, we could avoid reading the gyro and read only 6 bytes
-  buf[0] = 0x22; // OUTX_L_G
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-  jsi2cRead(&i2cAccel, ACCEL_ADDR, 12, buf, true);
+  jsi2cReadReg(&i2cAccel, ACCEL_ADDR, 0x22, 12, buf); // OUTX_L_G
   gyro_reading[0] = (buf[1]<<8) | buf[0];
   gyro_reading[1] = (buf[3]<<8) | buf[2];
   gyro_reading[2] = (buf[5]<<8) | buf[4];
@@ -571,9 +571,7 @@ void accel_wait() {
   unsigned char buf[1];
   timeout = 400;
   do {
-    buf[0] = 0x1E; // STATUS_REG
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-    jsi2cRead(&i2cAccel, ACCEL_ADDR, 1, buf, true);
+    jsi2cReadReg(&i2cAccel, ACCEL_ADDR, 0x1E, 1, buf); // STATUS_REG
     //jsiConsolePrintf("M %d\n", buf[0]);
   } while (!(buf[0]&3) && --timeout); // ZYXDA
   if (!timeout) jsExceptionHere(JSET_INTERNALERROR, "Timeout (Accelerometer)");
@@ -709,7 +707,7 @@ Check out [the Puck.js page on the
 magnetometer](http://www.espruino.com/Puck.js#on-board-peripherals) for more
 information.
 
-```JS
+```
 Puck.magOn(10); // 10 Hz
 Puck.on('mag', function(e) {
   print(e);
@@ -731,7 +729,7 @@ Called after `Puck.accelOn()` every time accelerometer data is sampled. There is
 one argument which is an object of the form `{acc:{x,y,z}, gyro:{x,y,z}}`
 containing the data.
 
-```JS
+```
 Puck.accelOn(12.5); // default 12.5Hz
 Puck.on('accel', function(e) {
   print(e);
@@ -946,9 +944,7 @@ JsVarFloat jswrap_puck_getTemperature() {
     //buf[1] = 1; // CONF
     //buf[0] = 0; // on
     //jsi2cWrite(&i2cTemp,TEMP_ADDR, 1, buf, false);
-    buf[0] = 0; // TEMP
-    jsi2cWrite(&i2cTemp,TEMP_ADDR, 1, buf, false);
-    jsi2cRead(&i2cTemp, TEMP_ADDR, 2, buf, true);
+    jsi2cReadReg(&i2cTemp, TEMP_ADDR, 0, 2, buf); // TEMP
     int t = (buf[0]<<3) | (buf[1]>>5);
     if (t&1024) t-=2048; // negative
     temp_off();
@@ -1131,28 +1127,42 @@ void jswrap_puck_accelWr(JsVarInt reg, JsVarInt data) {
     "name" : "accelRd",
     "generate" : "jswrap_puck_accelRd",
     "params" : [
-      ["reg","int",""]
+      ["reg","int",""],
+      ["cnt","int","If specified, returns a `Uint8Array` of the given length. If `undefined` (or 0) it returns a number"]
     ],
-    "return" : ["int",""],
+    "return" : ["JsVar",""],
     "ifdef" : "PUCKJS"
 }
 Reads a register from the LSM6DS3TR-C Accelerometer. Can be used for configuring
 advanced functions.
 
+* `Puck.accelRd(reg)` returns the value of the given register as a number.
+* `Puck.accelRd(reg, 64)` reads 64 bytes starting at the given register and returns
+  them as a `Uint8Array`.
+
+If the amount of data to read is too large to fit on the stack, `undefined` is returned.
+
 Check out [the Puck.js page on the
 accelerometer](http://www.espruino.com/Puck.js#on-board-peripherals) for more
 information and links to modules that use this function.
 */
-int jswrap_puck_accelRd(JsVarInt reg) {
+JsVar *jswrap_puck_accelRd(JsVarInt reg, JsVarInt cnt) {
   if (!PUCKJS_HAS_ACCEL) {
     jswrap_puck_notAvailableException("Accelerometer");
-    return -1;
+    return 0;
   }
-  unsigned char buf[1];
-  buf[0] = (unsigned char)reg;
-  jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-  jsi2cRead(&i2cAccel, ACCEL_ADDR, 1, buf, true);
-  return buf[0];
+  int max = jsuGetFreeStack() - 500;
+  if (cnt>max) return 0; // too big
+  if (cnt<0) cnt=0;
+  unsigned char *buf = (unsigned char *)alloca((size_t)cnt);
+  if (!buf) return 0;
+  jsi2cReadReg(&i2cAccel, ACCEL_ADDR, reg, (cnt==0)?1:cnt, buf);
+  if (cnt) {
+    JsVar *ab = jsvNewArrayBufferWithData(cnt, buf);
+    JsVar *d = jswrap_typedarray_constructor(ARRAYBUFFERVIEW_UINT8, ab,0,0);
+    jsvUnLock(ab);
+    return d;
+  } else return jsvNewFromInteger(buf[0]);
 }
 
 /*JSON{
@@ -1245,8 +1255,7 @@ void jswrap_puck_IR(JsVar *data, Pin cathode, Pin anode) {
       if (hasPulses) jstPinOutputAtTime(time, &timerOffset, &anode, 1, pulsePolarity);
       else jshPinSetState(anode, JSHPINSTATE_GPIO_OUT);
     } else {
-      if (pulsePolarity) jstExecuteFn(_jswrap_puck_IR_on, NULL, time, 0, &timerOffset);
-      else jstExecuteFn(_jswrap_puck_IR_off, NULL, time, 0, &timerOffset);
+      jstExecuteFn(pulsePolarity ? _jswrap_puck_IR_on : _jswrap_puck_IR_off, NULL, time, 0, &timerOffset);
     }
     hasPulses = true;
     time += jshGetTimeFromMilliseconds(pulseTime);
@@ -1490,7 +1499,7 @@ bool _jswrap_puck_selfTest(bool advertisePassOrFail) {
     }
   }
 
-  if (PUCKJS_HAS_IR) {
+  if (PUCKJS_HAS_IR && !PUCKJS_HAS_IR_FET) {
     jshPinSetState(IR_ANODE_PIN, JSHPINSTATE_GPIO_IN_PULLDOWN);
     jshPinSetState(IR_CATHODE_PIN, JSHPINSTATE_GPIO_OUT);
     jshPinSetValue(IR_CATHODE_PIN, 1);
@@ -1551,9 +1560,7 @@ bool _jswrap_puck_selfTest(bool advertisePassOrFail) {
   if (PUCKJS_HAS_ACCEL) {
     accel_on(1660000);
     unsigned char buf[1];
-    buf[0] = 0x0F; // WHOAMI
-    jsi2cWrite(&i2cAccel, ACCEL_ADDR, 1, buf, false);
-    jsi2cRead(&i2cAccel, ACCEL_ADDR, 1, buf, true);
+    jsi2cReadReg(&i2cAccel, ACCEL_ADDR, 0x0F, 1, buf); // WHOAMI
     accel_off();
     if (buf[0]!=106) {
       if (!err[0]) strcpy(err,"ACC");
@@ -1704,9 +1711,10 @@ void jswrap_puck_init() {
     } else {
       // Is it 2v1?
       puckVersion = PUCKJS_2V1; // set version so we use the correct I2C address
+      buf[0]=255;
       mag_rd(0x39, buf, 1); // MMC5603NJ WHO_AM_I
       //jsiConsolePrintf("MMC5603NJ %d\n", buf[0]);
-      if (buf[0] == 16) {
+      if (buf[0] == 16 || buf[0] == 0) {
         puckVersion = PUCKJS_2V1;
       } else {
         //jsiConsolePrintf("No magnetometer\n");
@@ -1737,7 +1745,7 @@ void jswrap_puck_init() {
   package don't do that as the device might be connected to something which will
   make the test keep failing.  */
   bool firstRunAfterFlash = false;
-#ifndef DFU_UPDATE_BUILD
+#ifdef ESPR_TEST_ON_FIRST_RUN
   uint32_t firstStartFlagAddr = FLASH_SAVED_CODE_START-4;
   if (firstStart) {
     // check the 4 bytes *right before* our saved code. If these are 0xFFFFFFFF
@@ -1754,7 +1762,7 @@ void jswrap_puck_init() {
     // if we're doing our first run after being flashed with new firmware, we set the advertising name
     // up to say PASS or FAIL, to work with the factory test process.
     bool result = _jswrap_puck_selfTest(firstRunAfterFlash);
-#ifndef DFU_UPDATE_BUILD
+#ifdef ESPR_TEST_ON_FIRST_RUN
     // if we passed, set the flag in flash so we don't self-test again
     if (firstRunAfterFlash && result) {
       uint32_t buf = 0;
@@ -1847,7 +1855,7 @@ bool jswrap_puck_idle() {
 }*/
 void jswrap_puck_powerusage(JsVar *devices) {
   if (mag_enabled)
-    jsvObjectSetChildAndUnLock(devices, "mag", jsvNewFromInteger(mag_power));
+    jsvObjectSetIntChild(devices, "mag", mag_power);
   if (accel_enabled)
-    jsvObjectSetChildAndUnLock(devices, "accel", jsvNewFromInteger(accel_power));
+    jsvObjectSetIntChild(devices, "accel", accel_power);
 }

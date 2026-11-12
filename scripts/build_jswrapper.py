@@ -43,6 +43,9 @@ boardName = boardName[2:]
 wrapperFileName = sys.argv[len(sys.argv)-1]
 wrapperFileName = wrapperFileName[2:]
 
+print("BOARD "+boardName)
+board = importlib.import_module(boardName)
+
 # Load any JS modules specified on command-line
 jsmodules = {}     # JS modules to be included
 jsbootcode = False # if set, JS code to be run at boot time
@@ -63,6 +66,9 @@ for i in range(1,len(sys.argv)):
       jsbootcode = jscode
     else:
       jsmodules[modulename] = jscode
+# ... or in the BOARD.py...
+if "jsbootcode" in board.info["build"]:
+  jsbootcode = board.info["build"]["jsbootcode"]
 
 # List of argument specifiers (JSWAT...) that have been used
 argSpecs = []
@@ -206,6 +212,7 @@ def codeOutSymbolTable(builtin):
   # output tables
   listSymbols = []
   listChars = ""
+  listCharItems = []
   strLen = 0
   for sym in builtin["functions"]:
     symName = sym["name"];
@@ -214,6 +221,10 @@ def codeOutSymbolTable(builtin):
       continue # don't include libraries on global namespace
     if "generate" in sym:
       listSymbols.append("JSWSYMPTR_ENTRY("+", ".join([str(strLen), getArgumentSpecifier(sym), "(void*)"+sym["generate"]])+")")
+      if symName in listCharItems:
+        print("ERROR: duplicate symbol "+symName+" in symbol table for jswSymbols_"+codeName)
+        exit(1)
+      listCharItems.append(symName);
       listChars = listChars + symName + "\\0";
       strLen = strLen + len(symName) + 1
     else:
@@ -275,9 +286,6 @@ def removeBlacklistForWrapper(blacklistfile,datas):
 # ------------------------------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------------------------------
-
-print("BOARD "+boardName)
-board = importlib.import_module(boardName)
 
 jsondatas = common.get_jsondata(is_for_document = False, parseArgs = True, boardObject = board)
 if 'BLACKLIST' in os.environ:
@@ -379,15 +387,15 @@ for jsondata in jsondatas:
       print(common.as_c_string(js)+"\n")
       FATAL_ERROR("generate_js function doesn't end in })")
 
-    fnMatch = re.match(r"^\((function|\252)\(([^\)]*)\)", js);
+    fnMatch = re.match(r"^\((function|\252)\(([^\)]*)\)( *){", js);
 
     if fnMatch:
-      fnKeyword, fnArgs = fnMatch.groups()
-      fnCode = js[len(fnKeyword)+len(fnArgs)+4:-2]
+      fnKeyword, fnArgs, fnWhitespace = fnMatch.groups()
+      fnCode = js[len(fnKeyword)+len(fnArgs)+4+len(fnWhitespace):-2].strip()
       statement = "jspExecuteJSFunctionCode("+common.as_c_string(fnArgs)+", "+common.as_c_string(fnCode)+", "+str(len(fnCode))
     else:
       print(common.as_c_string(js)+"\n")
-      FATAL_ERROR("generate_js function not in the correct format")
+      FATAL_ERROR("generate_js function not in the correct format ("+jsondata["generate"]+")")
 
     if hasThis(jsondata): statement = statement + ", parent"
     else: statement = statement + ", NULL"
@@ -431,7 +439,7 @@ JsVar *jswBinarySearch(const JswSymList *symbolsPtr, JsVar *parent, const char *
     const JswSymPtr *sym = &symbolsPtr->symbols[idx];
     int cmp = FLASH_STRCMP(name, &symbolsPtr->symbolChars[JSWSYMPTR_OFFSET(sym)]);
     if (cmp==0) {
-      unsigned short functionSpec = sym->functionSpec;
+      unsigned short functionSpec = READ_FLASH_UINT16(&sym->functionSpec);
       if ((functionSpec & JSWAT_EXECUTE_IMMEDIATELY_MASK) == JSWAT_EXECUTE_IMMEDIATELY)
         return jsnCallFunction(JSWSYMPTR_FUNCTION_PTR(sym), functionSpec, parent, 0, 0);
       return jsvNewNativeFunction(JSWSYMPTR_FUNCTION_PTR(sym), functionSpec);
@@ -707,7 +715,7 @@ codeOut('bool jswIdle() {')
 codeOut('  bool wasBusy = false;')
 for jsondata in jsondatas:
   if "type" in jsondata and jsondata["type"]=="idle":
-    codeOut("  if ("+jsondata["generate"]+"()) wasBusy = true;")
+    codeOut("  wasBusy |= "+jsondata["generate"]+"();")
 codeOut('  return wasBusy;')
 codeOut('}')
 
@@ -758,20 +766,28 @@ codeOut('')
 
 codeOut("/** Tasks to run when a character is received on a certain event channel. True if handled and shouldn't go to IRQ (type:'EV_SERIAL1/etc' in JSON) */")
 codeOut('bool jswOnCharEvent(IOEventFlags channel, char charData) {')
-codeOut('  NOT_USED(channel);')
-codeOut('  NOT_USED(charData);')
+used = False
 for jsondata in jsondatas:
   if "type" in jsondata and jsondata["type"]!="EV_CUSTOM" and jsondata["type"].startswith("EV_"):
     codeOut("  if (channel=="+jsondata["type"]+") return "+jsondata["generate"]+"(charData);")
+    used = True
+if not used:
+  codeOut('  NOT_USED(channel);')
+  codeOut('  NOT_USED(charData);')
 codeOut('  return false;')
 codeOut('}')
 
 codeOut("/** When we receive EV_CUSTOM, this is called so any library (eg Waveform) can hook onto it (type:'EV_CUSTOM' in JSON) */")
-codeOut('void jswOnCustomEvent(IOEvent *event) {')
-codeOut('  NOT_USED(event);')
+codeOut('void jswOnCustomEvent(IOEventFlags eventFlags, uint8_t *data, int dataLen) {')
+used = False
 for jsondata in jsondatas:
   if "type" in jsondata and jsondata["type"]=="EV_CUSTOM":
-    codeOut("  "+jsondata["generate"]+"(event);")
+    codeOut("  "+jsondata["generate"]+"(eventFlags, data, dataLen);")
+    used = True
+if not used:
+  codeOut('  NOT_USED(eventFlags);')
+  codeOut('  NOT_USED(data);')
+  codeOut('  NOT_USED(dataLen);')
 codeOut('}')
 
 codeOut('')
@@ -783,9 +799,12 @@ codeOut('')
 
 codeOut("/** If we have a built-in module with the given name, return the module's contents - or 0 */")
 codeOut('const char *jswGetBuiltInJSLibrary(const char *name) {')
-codeOut('  NOT_USED(name);')
+used = False
 for modulename in jsmodules:
   codeOut("  if (!strcmp(name,\""+modulename+"\")) return "+common.as_c_string(jsmodules[modulename])+";")
+  used = True
+if not used:
+  codeOut('  NOT_USED(name);')
 codeOut('  return 0;')
 codeOut('}')
 
@@ -850,6 +869,7 @@ if "USE_CALLFUNCTION_HACK" in board.defines:
   writeCallFunctionHackEntry(argSpecs, {'type': 'method', 'class': 'X', 'name': 'X', 'generate': 'X', 'params': [['1', 'JsVar', ''],['2', 'JsVar', '']]}) # jswrap_promise
   writeCallFunctionHackEntry(argSpecs, {'type': 'method', 'class': 'X', 'name': 'X', 'generate': 'X', 'params': [['1', 'JsVar', ''],['2', 'JsVar', ''],['3', 'JsVar', '']]}) # jswrap_promise
   writeCallFunctionHackEntry(argSpecs, {'type': 'method', 'class': 'X', 'name': 'X', 'generate': 'X', 'params': [['1', 'bool', '']]}) # jswrap_pixljs/banglejs
+  writeCallFunctionHackEntry(argSpecs, {'type': 'method', 'class': 'X', 'name': 'X', 'generate': 'X', 'params': [['1', 'int', '']]}) # jswrap_banglejs flip fn
   writeCallFunctionHackEntry(argSpecs, {'type': 'function', 'name': 'X', 'generate': 'X', 'params': [['1', 'int', ''],['1', 'int', '']], 'return': ['JsVar','']}) # jswrap_banglejs
   writeCallFunctionHackEntry(argSpecs, {'type': 'function', 'name': 'X', 'generate': 'X', 'params': [['1', 'float', ''],['1', 'float', '']], 'return': ['float','']}) # jswrap_banglejs + jswrap_arraybuffer
   writeCallFunctionHackEntry(argSpecs, {'type': 'function', 'name': 'X', 'generate': 'X', 'params': [['1', 'int', ''],['1', 'int', '']], 'return': ['int','']}) # jswrap_arraybuffer

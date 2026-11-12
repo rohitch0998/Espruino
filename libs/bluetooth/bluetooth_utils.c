@@ -18,12 +18,12 @@
 #include "jsparse.h"
 #include "jshardware.h"
 #include "jswrap_bluetooth.h"
+#include "bluetooth_common.h"
 
 #ifdef NRF5X
 #include "app_error.h"
 #endif
 #ifdef ESP32
-#include "esp_bt.h"
 #include "esp_gattc_api.h"
 #include "BLE/esp32_bluetooth_utils.h"
 #endif
@@ -71,7 +71,7 @@ JsVar *bleUUIDToStr(ble_uuid_t uuid) {
   assert(dataLen==16); // it should always be 16 as we checked above
   return bleUUID128ToStr(&data[0]);
 #else
-  return bleUUID128ToStr(&uuid.uuid128);
+  return bleUUID128ToStr(uuid.uuid128);
 #endif
 }
 
@@ -311,9 +311,9 @@ JsVar *blePrivacyToVar(pm_privacy_params_t *privacy) {
     }
     JsVar *result = jsvNewObject();
     if (!result) return 0;
-    jsvObjectSetChildAndUnLock(result, "mode", jsvNewFromString(mode_str));
-    jsvObjectSetChildAndUnLock(result, "addr_type", jsvNewFromString(addr_type_str));
-    jsvObjectSetChildAndUnLock(result, "addr_cycle_s", jsvNewFromInteger(privacy->private_addr_cycle_s));
+    jsvObjectSetStringChild(result, "mode", mode_str);
+    jsvObjectSetStringChild(result, "addr_type", addr_type_str);
+    jsvObjectSetIntChild(result, "addr_cycle_s", privacy->private_addr_cycle_s);
     return result;
   }
   return 0;
@@ -372,34 +372,55 @@ uint16_t bleGetGATTHandle(ble_uuid_t char_uuid) {
 }
 #endif
 
+/// Get the Bluetooth Device Name - name should be at least 32 bytes long
+size_t jsbleGetDeviceName(char *deviceName) {
+ uint32_t addr[2];
+ jswrap_ble_getAddress_binary(addr, true/*use current address*/);
+
+#if defined(BLUETOOTH_NAME_PREFIX)
+  strcpy(deviceName, BLUETOOTH_NAME_PREFIX);
+#else
+  strcpy(deviceName,"Espruino "PC_BOARD_ID);
+#endif
+  size_t len = strlen(deviceName);
+#if defined(BLUETOOTH_NAME_PREFIX)
+  // append last 2 bytes of MAC address to name
+  deviceName[len++] = ' ';
+  deviceName[len++] = itoch((addr[0]>>12)&15);
+  deviceName[len++] = itoch((addr[0]>>8)&15);
+  deviceName[len++] = itoch((addr[0]>>4)&15);
+  deviceName[len++] = itoch((addr[0])&15);
+#endif
+  deviceName[len] = 0; // null terminate just in case
+  return len;
+}
+
 /// Add a new bluetooth event to the queue with a buffer of data
 void jsble_queue_pending_buf(BLEPending blep, uint16_t data, char *ptr, size_t len) {
+  assert(ptr);
+  assert(len+3 <= IOEVENT_MAX_LEN);
+  if (len > IOEVENT_MAX_LEN-3)
+    len = IOEVENT_MAX_LEN-3;
   // check to ensure we have space for the data we're adding
-  if (!jshHasEventSpaceForChars(len+IOEVENT_MAXCHARS)) {
+  if (!jshHasEventSpaceForChars(len+3)) {
     jsErrorFlags |= JSERR_RX_FIFO_FULL;
     return;
   }
-  // Push the data for the event first
-  while (len) {
-    int evtLen = len;
-    if (evtLen > IOEVENT_MAXCHARS) evtLen=IOEVENT_MAXCHARS;
-    IOEvent evt;
-    evt.flags = EV_BLUETOOTH_PENDING_DATA;
-    IOEVENTFLAGS_SETCHARS(evt.flags, evtLen);
-    memcpy(evt.data.chars, ptr, evtLen);
-    jshPushEvent(&evt);
-    ptr += evtLen;
-    len -= evtLen;
-  }
-  // Push the actual event
-  JsSysTime d = (JsSysTime)((data<<8)|blep);
-  jshPushIOEvent(EV_BLUETOOTH_PENDING, d);
+  uint8_t buf[IOEVENT_MAX_LEN];
+  buf[0] = blep;
+  buf[1] = data;
+  buf[2] = data>>8;
+  memcpy(&buf[3], ptr, len);
+  jshPushEvent(EV_BLUETOOTH_PENDING, buf, len+3);
 }
 
 /// Add a new bluetooth event to the queue with 16 bits of data
 void jsble_queue_pending(BLEPending blep, uint16_t data) {
-  JsSysTime d = (JsSysTime)((data<<8)|blep);
-  jshPushIOEvent(EV_BLUETOOTH_PENDING, d);
+  uint8_t buf[3];
+  buf[0] = blep;
+  buf[1] = data;
+  buf[2] = data>>8;
+  jshPushEvent(EV_BLUETOOTH_PENDING, buf, sizeof(buf));
 }
 
 /* Handler for common event types (between nRF52/ESP32). Called first
@@ -413,18 +434,34 @@ bool jsble_exec_pending_common(BLEPending blep, uint16_t data, unsigned char *bu
     jsvUnLock(v);
     break;
   }
+#ifndef ESP32
+   case BLEP_CONNECTED: {
+     assert(bufferLen == sizeof(ble_gap_addr_t));
+     ble_gap_addr_t *peer_addr = (ble_gap_addr_t*)buffer;
+     bleQueueEventAndUnLock(JS_EVENT_PREFIX"connect", bleAddrToStr(*peer_addr));
+     jshHadEvent();
+     break;
+   }
+   case BLEP_DISCONNECTED: {
+     JsVar *reason = jsvNewFromInteger(data);
+     bleQueueEventAndUnLock(JS_EVENT_PREFIX"disconnect", reason);
+     break;
+   }
+#endif
   case BLEP_ADV_REPORT: {
     BLEAdvReportData *p_adv = (BLEAdvReportData *)buffer;
-    size_t len = sizeof(BLEAdvReportData) + p_adv->dlen - BLE_GAP_ADV_MAX_SIZE;
+    size_t len = sizeof(BLEAdvReportData) + p_adv->dlen - sizeof(p_adv->data);
     if (bufferLen != len) {
-      jsiConsolePrintf("%d %d %d\n", bufferLen,len,p_adv->dlen);
+#ifndef RELEASE
+      jsiConsolePrintf("BLEP_ADV %d %d %d\n", bufferLen,len,p_adv->dlen);
+#endif
       assert(0);
       break;
     }
     JsVar *evt = jsvNewObject();
     if (evt) {
-      jsvObjectSetChildAndUnLock(evt, "rssi", jsvNewFromInteger(p_adv->rssi));
-      //jsvObjectSetChildAndUnLock(evt, "addr_type", jsvNewFromInteger(blePendingAdvReport.peer_addr.addr_type));
+      jsvObjectSetIntChild(evt, "rssi", p_adv->rssi);
+      //jsvObjectSetIntChild(evt, "addr_type", blePendingAdvReport.peer_addr.addr_type);
       jsvObjectSetChildAndUnLock(evt, "id", bleAddrToStr(p_adv->peer_addr));
       JsVar *data = jsvNewStringOfLength(p_adv->dlen, (char*)p_adv->data);
       if (data) {
@@ -457,8 +494,8 @@ bool jsble_exec_pending_common(BLEPending blep, uint16_t data, unsigned char *bu
 #endif
 
     bleSetActiveBluetoothGattServer(data, bleTaskInfo); /* bleTaskInfo = instance of BluetoothRemoteGATTServer */
-    jsvObjectSetChildAndUnLock(bleTaskInfo, "connected", jsvNewFromBool(true));
-    jsvObjectSetChildAndUnLock(bleTaskInfo, "handle", jsvNewFromInteger(handle));
+    jsvObjectSetBoolChild(bleTaskInfo, "connected", true);
+    jsvObjectSetIntChild(bleTaskInfo, "handle", handle);
     bleCompleteTaskSuccess(BLETASK_CONNECT, bleTaskInfo);
     break;
   }
@@ -487,9 +524,9 @@ bool jsble_exec_pending_common(BLEPending blep, uint16_t data, unsigned char *bu
     if (o) {
       jsvObjectSetChild(o,"device", bleTaskInfo);
       jsvObjectSetChildAndUnLock(o,"uuid", bleUUIDToStr(uuid));
-      jsvObjectSetChildAndUnLock(o,"isPrimary", jsvNewFromBool(true));
-      jsvObjectSetChildAndUnLock(o,"start_handle", jsvNewFromInteger(start_handle));
-      jsvObjectSetChildAndUnLock(o,"end_handle", jsvNewFromInteger(end_handle));
+      jsvObjectSetBoolChild(o,"isPrimary", true);
+      jsvObjectSetIntChild(o,"start_handle", start_handle);
+      jsvObjectSetIntChild(o,"end_handle", end_handle);
       jsvArrayPushAndUnLock(bleTaskInfo2, o);
     }
     break;
@@ -527,7 +564,7 @@ bool jsble_exec_pending_common(BLEPending blep, uint16_t data, unsigned char *bu
     JsVar *gattServer = bleGetActiveBluetoothGattServer(centralIdx);
     if (gattServer) {
       JsVar *bluetoothDevice = jsvObjectGetChildIfExists(gattServer, "device");
-      jsvObjectSetChildAndUnLock(gattServer, "connected", jsvNewFromBool(false));
+      jsvObjectSetBoolChild(gattServer, "connected", false);
       jsvObjectRemoveChild(gattServer, "handle");
       if (bluetoothDevice) {
         // HCI error code, see BLE_HCI_STATUS_CODES in ble_hci.h
@@ -539,6 +576,19 @@ bool jsble_exec_pending_common(BLEPending blep, uint16_t data, unsigned char *bu
       jsvUnLock2(gattServer, bluetoothDevice);
     }
     bleSetActiveBluetoothGattServer(centralIdx, 0);
+    // when we disconnect, remove handles for notifications for this connection
+    JsVar *handles = jsvObjectGetChildIfExists(execInfo.hiddenRoot, "bleHdl");
+    JsvObjectIterator it;
+    jsvObjectIteratorNew(&it, handles); // it's actually an array, but object iterator is ok
+    while (jsvObjectIteratorHasValue(&it)) {
+      int handleValue = jsvGetIntegerAndUnLock(jsvObjectIteratorGetKey(&it));
+      if ((handleValue >> BLEP_CENTRAL_NOTIFICATION_CONN_SHIFT) == centralIdx)
+        jsvObjectIteratorRemoveAndGotoNext(&it, handles);
+      else
+        jsvObjectIteratorNext(&it);
+    }
+    jsvObjectIteratorFree(&it);
+    jsvUnLock(handles);
     break;
   }
   case BLEP_CENTRAL_NOTIFICATION: {
@@ -583,3 +633,4 @@ bool jsble_exec_pending_common(BLEPending blep, uint16_t data, unsigned char *bu
   }
   return true;
 }
+

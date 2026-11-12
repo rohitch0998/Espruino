@@ -170,7 +170,7 @@ void jshKickSoftWatchDog() {
 }
 
 /// Called when we have had an event that means we should execute JS
-void jshHadEvent() {
+__attribute__((weak)) void jshHadEvent() {
   jshHadEventDuringSleep = true;
 }
 
@@ -181,4 +181,13 @@ __attribute__((weak)) void jsvGetProcessorPowerUsage(JsVar *devices) {
 
 __attribute__((weak)) JsVar *jshGetSystemClock() {
   return 0;
+}
+
+/// backup implementation - returns false for everything
+__attribute__((weak)) bool jshGetPinAddress(Pin pin, JshGetPinAddressResult *result) {
+  result->in_addr = 0;
+  result->set_addr = 0;
+  result->clr_addr = 0;
+  result->mask = 0;
+  return false;
 }

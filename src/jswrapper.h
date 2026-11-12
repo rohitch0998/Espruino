@@ -83,10 +83,12 @@ typedef struct {
 // Macro used for defining entries in JswSymPtr jswSymbols_*
 #define JSWSYMPTR_ENTRY(offset, argSpec, pointer) \
   { offset, argSpec, pointer}
-#define JSWSYMPTR_OFFSET(symPtr) \
-  ((symPtr)->strOffset)
-#define JSWSYMPTR_FUNCTION_PTR(symPtr) \
-  ((symPtr)->functionPtr)
+#ifdef ESP8266 // ESP8266 doesn't like unaligned accesses (#2687)
+#define JSWSYMPTR_OFFSET(symPtr) READ_FLASH_UINT16(&((symPtr)->strOffset))
+#else
+#define JSWSYMPTR_OFFSET(symPtr) ((symPtr)->strOffset)
+#endif
+#define JSWSYMPTR_FUNCTION_PTR(symPtr) ((symPtr)->functionPtr)
 #else // ESPR_PACKED_SYMPTR - strOffset *is* packed into function pointer
 // On most ARM embedded targets we know the top 12 bits of the address are 0, so we use them for storing 'strOffset'
 typedef struct {
@@ -116,7 +118,7 @@ typedef struct {
 /// Do a binary search of the symbol table list
 JsVar *jswBinarySearch(const JswSymList *symbolsPtr, JsVar *parent, const char *name);
 
-/** If 'name' is something that belongs to an internal function, execute it.  */
+/** If 'name' is something that belongs to an internal function, return it (it'll be created on demand).  */
 JsVar *jswFindBuiltInFunction(JsVar *parent, const char *name);
 
 /// Given an object, return the list of symbols for it
@@ -156,7 +158,7 @@ void jswGetPowerUsage(JsVar *devices);
 bool jswOnCharEvent(IOEventFlags channel, char charData);
 
 /** When we receive EV_CUSTOM, this is called so any library (eg Waveform) can hook onto it (type:'EV_CUSTOM' in JSON) */
-void jswOnCustomEvent(IOEvent *event);
+void jswOnCustomEvent(IOEventFlags eventFlags, uint8_t *data, int dataLen);
 
 /** If we get this in 'require', do we have the object for this
   inside the interpreter already? If so, return the native function

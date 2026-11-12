@@ -159,7 +159,7 @@ JsVar *jswrap_crypto_SHAx(JsVar *message, int shaNum) {
 #endif
 
   JSV_GET_AS_CHAR_ARRAY(msgPtr, msgLen, message);
-  if (!msgPtr) return 0;
+  if (!msgPtr) return 0; // already errored
 
   int bufferSize = 20;
   if (shaNum>1) bufferSize = shaNum/8;
@@ -307,9 +307,9 @@ JsVar *jswrap_crypto_PBKDF2(JsVar *passphrase, JsVar *salt, JsVar *options) {
     return 0; // already shown an error
 
   JSV_GET_AS_CHAR_ARRAY(passPtr, passLen, passphrase);
-  if (!passPtr) return 0;
+  if (!passPtr) return 0; // already errored
   JSV_GET_AS_CHAR_ARRAY(saltPtr, saltLen, salt);
-  if (!saltPtr) return 0;
+  if (!saltPtr) return 0; // already errored
 
   int err;
   mbedtls_md_context_t ctx;
@@ -325,11 +325,30 @@ JsVar *jswrap_crypto_PBKDF2(JsVar *passphrase, JsVar *salt, JsVar *options) {
     return 0;
   }
 
-  err = mbedtls_pkcs5_pbkdf2_hmac( &ctx,
-        (unsigned char*)passPtr, passLen,
-        (unsigned char*)saltPtr, saltLen,
-        (unsigned)iterations,
-        (unsigned)keySize*4, (unsigned char*)keyPtr );
+#if defined(MBEDTLS_VERSION_NUMBER) && (MBEDTLS_VERSION_NUMBER >= 0x03000000)
+  err = mbedtls_pkcs5_pbkdf2_hmac_ext(
+      hasher,                    // mbedtls_md_type_t
+      (unsigned char *)passPtr,  // password
+      (size_t)passLen,           // pLen
+      (unsigned char *)saltPtr,  // salt
+      (size_t)saltLen,           // sLen
+      (unsigned int)iterations,  // iterations
+      (size_t)keySize * 4,       // keyLen in bytes
+      (unsigned char *)keyPtr    // key output buffer
+      );
+#else
+  err = mbedtls_pkcs5_pbkdf2_hmac(
+      &ctx,
+      (unsigned char *)passPtr,  // password
+      (size_t)passLen,           // pLen
+      (unsigned char *)saltPtr,  // salt
+      (size_t)saltLen,           // sLen
+      (unsigned int)iterations,  // iterations
+      (size_t)keySize * 4,       // keyLen in bytes
+      (unsigned char *)keyPtr    // key output buffer
+      );
+#endif
+
   mbedtls_md_free( &ctx );
   if (!err) {
     return keyArr;
@@ -372,10 +391,10 @@ static NO_INLINE JsVar *jswrap_crypto_AEScrypt(JsVar *message, JsVar *key, JsVar
   mbedtls_aes_init( &aes );
 
   JSV_GET_AS_CHAR_ARRAY(messagePtr, messageLen, message);
-  if (!messagePtr) return 0;
+  if (!messagePtr) return 0; // already errored
 
   JSV_GET_AS_CHAR_ARRAY(keyPtr, keyLen, key);
-  if (!keyPtr) return 0;
+  if (!keyPtr) return 0; // already errored
 
   if (encrypt)
     err = mbedtls_aes_setkey_enc( &aes, (unsigned char*)keyPtr, (unsigned int)keyLen*8 );
@@ -512,10 +531,10 @@ JsVar *jswrap_crypto_AES_ccmCrypt(JsVar *message, JsVar *key, JsVar *iv, JsVar *
   }
 
   JSV_GET_AS_CHAR_ARRAY(messagePtr, messageLen, message);
-  if (!messagePtr) return NULL;
+  if (!messagePtr) return NULL; // already errored
 
   JSV_GET_AS_CHAR_ARRAY(keyPtr, keyLen, key);
-  if (!keyPtr) return NULL;
+  if (!keyPtr) return NULL; // already errored
 
   char *outMessagePtr = NULL;
   JsVar *outVar = jsvNewArrayBufferWithPtr(messageLen, &outMessagePtr);

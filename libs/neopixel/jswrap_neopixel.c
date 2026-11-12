@@ -25,7 +25,7 @@
 #include "esp32_neopixel.h"
 #endif
 #ifdef WIO_LTE
-#include "stm32_ws2812b_driver.h"
+#include "neopixel_bitbang.h"
 #endif
 
 #include "jswrap_neopixel.h"
@@ -111,10 +111,7 @@ range.
 */
 void jswrap_neopixel_write(Pin pin, JsVar *data) {
   JSV_GET_AS_CHAR_ARRAY(rgbData, rgbSize, data);
-  if (!rgbData) {
-    jsExceptionHere(JSET_ERROR, "Couldn't convert %t to data to send to LEDs", data);
-    return;
-  }
+  if (!rgbData) return; // already errored
   if (rgbSize == 0) {
     jsExceptionHere(JSET_ERROR, "Data must be a non empty array");
     return;
@@ -135,7 +132,7 @@ void jswrap_neopixel_write(Pin pin, JsVar *data) {
 #if defined(WIO_LTE)
 
 bool neopixelWrite(Pin pin, unsigned char *rgbData, size_t rgbSize) {
-  return stm32_neopixelWrite(pin, rgbData, rgbSize);
+  return neopixelWrite_bitbang(pin, rgbData, rgbSize);
 }
 
 #elif defined(STM32) // ----------------------------------------------------------------

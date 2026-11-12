@@ -74,8 +74,12 @@
 
 #if ESPR_I2C_COUNT>0
 #define TWI_ENABLED 1
+#define TWI0_ENABLED 1
+#define TWI0_USE_EASY_DMA 0
+#if ESPR_I2C_COUNT>1
 #define TWI1_ENABLED 1
 #define TWI1_USE_EASY_DMA 0
+#endif
 #else
 #define TWI_ENABLED 0
 #endif // ESPR_I2C_COUNT
@@ -167,7 +171,7 @@
 #ifdef NRF5X_SDK_15 // SDK15/NRF52840
 
 // To allow advertising transmit via coded phy (connectable:true,scannable:false)
-// #define NRF_SDH_BLE_GAP_EVENT_LENGTH 10
+// #define NRF_SDH_BLE_GAP_EVENT_LENGTH 6
 #endif // NRF52840
 
 #ifdef NRF5X_SDK_17

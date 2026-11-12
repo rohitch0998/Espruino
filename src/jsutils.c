@@ -259,7 +259,7 @@ NO_INLINE void jsExceptionHere(JsExceptionType type, const char *fmt, ...) {
 
   JsVar *var = jsvNewFromEmptyString();
   if (!var) {
-    jspSetError(false);
+    jspSetError();
     return; // out of memory
   }
 
@@ -337,7 +337,7 @@ NO_INLINE void jsExceptionHere_flash(JsExceptionType type, const char *ffmt, ...
 
   JsVar *var = jsvNewFromEmptyString();
   if (!var) {
-    jspSetError(false);
+    jspSetError();
     return; // out of memory
   }
 
@@ -398,7 +398,7 @@ NO_INLINE void jsAssertFail(const char *file, int line, const char *expr) {
 #if defined(ARM)
   jsiConsolePrint("REBOOTING.\n");
   jshTransmitFlush();
-  NVIC_SystemReset();
+  jshReboot();
 #elif defined(ESP8266)
   // typically the Espruino console is over telnet, in which case nothing we do here will ever
   // show up, so we instead jump through some hoops to print to UART
@@ -930,7 +930,7 @@ int espruino_snprintf( char * s, size_t n, const char * fmt, ... ) {
 extern uint32_t LINKER_END_VAR; // should be 'void', but 'int' avoids warnings
 #endif
 
-/** get the amount of free stack we have, in bytes */
+/** get the amount of free stack we have, in bytes. Returns 0xFFFFFFFF if not implemented */
 size_t jsuGetFreeStack() {
 #ifdef ARM
   void *frame = __builtin_frame_address(0);
@@ -953,7 +953,7 @@ size_t jsuGetFreeStack() {
   //Early entries are in higher memory locations.
   //Later entries are in lower memory locations.
 
-
+  extern uintptr_t espruino_stackHighPtr;
   uint32_t stackPos   = (uint32_t)&ptr;
   uint32_t stackStart = (uint32_t)espruino_stackHighPtr - ESP_STACK_SIZE;
 
@@ -962,7 +962,7 @@ size_t jsuGetFreeStack() {
   return stackPos - stackStart;
 #else
   // stack depth seems pretty platform-specific :( Default to a value that disables it
-  return 1000000; // no stack depth check on this platform
+  return 0xFFFFFFFF; // no stack depth check on this platform
 #endif
 }
 

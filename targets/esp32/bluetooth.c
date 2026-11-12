@@ -15,6 +15,7 @@
 
 #include "esp_bt.h"
 #include "esp_bt_main.h"
+#include "esp_gap_ble_api.h"
 #include "esp_gatt_common_api.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -22,6 +23,7 @@
 #include "jswrap_bluetooth.h"
 #include "bluetooth.h"
 #include "bluetooth_utils.h"
+#include "bluetooth_common.h"
 #include "jsutils.h"
 #include "jsparse.h"
 #include "jsinteractive.h"
@@ -32,11 +34,6 @@
 #include "BLE/esp32_bluetooth_utils.h"
 #include "jshardwareESP32.h"
 
-volatile BLEStatus bleStatus;
-ble_uuid_t bleUUIDFilter;
-uint16_t bleAdvertisingInterval;           /**< The advertising interval (in units of 0.625 ms). */
-volatile uint16_t m_peripheral_conn_handle;    /**< Handle of the current connection. */
-volatile uint16_t m_central_conn_handles[1]; /**< Handle of central mode connection */
 
 /** Initialise the BLE stack - called before Espruino is ready */
 void jsble_init(){
@@ -51,8 +48,9 @@ void jsble_init(){
     if(initController()) return;
     if(initBluedroid()) return;
     if(registerCallbacks()) return;
-    setMtu();
-    gap_init_security();
+    ret = esp_ble_gatt_set_local_mtu(ESP_GATT_MTU_SIZE); // set MTU based on the most we're expecting to put in our queue at a time
+    if(ret) jsWarn("set local MTU failed:%x\n",ret);
+    jsble_update_security();
     // force advertising with the right info
     bleStatus |= BLE_IS_ADVERTISING;
   }
@@ -73,33 +71,17 @@ JsVar *jsble_get_error_string(uint32_t err_code) {
   return jsvVarPrintf("ERR 0x%x", err_code);
 }
 
-/// Executes a pending BLE event - returns the number of events Handled
-int jsble_exec_pending(IOEvent *event) {
-  int eventsHandled = 1;
-  // if we got event data, unpack it first into a buffer
-#if NRF_BLE_MAX_MTU_SIZE>64
-  unsigned char buffer[NRF_BLE_MAX_MTU_SIZE];
-#else
-  unsigned char buffer[64];
-#endif
-  assert(sizeof(buffer) >= sizeof(BLEAdvReportData));
-  size_t bufferLen = 0;
-  while (IOEVENTFLAGS_GETTYPE(event->flags) == EV_BLUETOOTH_PENDING_DATA) {
-    int i, chars = IOEVENTFLAGS_GETCHARS(event->flags);
-    for (i=0;i<chars;i++) {
-      assert(bufferLen < sizeof(buffer));
-      if (bufferLen < sizeof(buffer))
-        buffer[bufferLen++] = event->data.chars[i];
-    }
-
-    jshPopIOEvent(event);
-    eventsHandled++;
-  }
-  assert(IOEVENTFLAGS_GETTYPE(event->flags) == EV_BLUETOOTH_PENDING);
-
+/// Executes a pending BLE event - returns the number of event bytes handled. sizeof(buffer)==IOEVENT_MAX_LEN
+int jsble_exec_pending(uint8_t *buffer, int bufferLen) {
+  assert(IOEVENT_MAX_LEN >= sizeof(BLEAdvReportData));
+  int eventBytesHandled = 2+bufferLen;
   // Now handle the actual event
-  BLEPending blep = (BLEPending)(event->data.time&255);
-  uint16_t data = (uint16_t)(event->data.time>>8);
+  if (bufferLen<3) return 0;
+  BLEPending blep = (BLEPending)buffer[0];
+  uint16_t data = (uint16_t)(buffer[1] | (buffer[2]<<8));
+  // skip first 3 bytes
+  buffer += 3;
+  bufferLen -= 3;
   /* jsble_exec_pending_common handles 'common' events between nRF52/ESP32, then
    * we handle nRF52-specific events below */
   if (!jsble_exec_pending_common(blep, data, buffer, bufferLen)) switch (blep) {
@@ -107,7 +89,7 @@ int jsble_exec_pending(IOEvent *event) {
    default:
      jsWarn("jsble_exec_pending: Unknown enum type %d",(int)blep);
   }
-  return eventsHandled;
+  return eventBytesHandled;
 }
 
 void jsble_restart_softdevice(JsVar *jsFunction){
@@ -124,14 +106,15 @@ uint32_t jsble_advertising_start() {
   if(!ESP32_Get_NVS_Status(ESP_NETWORK_BLE))
     return ESP_ERR_INVALID_STATE; // ESP32.enableBLE(false)
   esp_err_t status;
-  if (bleStatus & BLE_IS_ADVERTISING) return;
+  if (bleStatus & BLE_IS_ADVERTISING) return 0;
   status = bluetooth_gap_startAdvertising(true);
   bleStatus |= BLE_IS_ADVERTISING;
   return status;
 }
+
 void jsble_advertising_stop() {
   if(!ESP32_Get_NVS_Status(ESP_NETWORK_BLE))
-    return ESP_ERR_INVALID_STATE; // ESP32.enableBLE(false)
+    return;
 
   esp_err_t status;
   if (!(bleStatus & BLE_IS_ADVERTISING)) return;
@@ -140,35 +123,6 @@ void jsble_advertising_stop() {
   if(status){
      jsExceptionHere(JSET_ERROR,"error in stop advertising:0X%x",status);
   }
-}
-/** Is BLE connected to any device at all? */
-bool jsble_has_connection(){
-  if(!ESP32_Get_NVS_Status(ESP_NETWORK_BLE))
-    return false; // ESP32.enableBLE(false)
-#if CENTRAL_LINK_COUNT>0
-  return (m_central_conn_handles[0] != BLE_GATT_HANDLE_INVALID) ||
-         (m_peripheral_conn_handle != BLE_GATT_HANDLE_INVALID);
-#else
-  return m_peripheral_conn_handle != BLE_GATT_HANDLE_INVALID;
-#endif
-}
-
-/** Is BLE connected to a central device at all? */
-bool jsble_has_central_connection(){
-  if(!ESP32_Get_NVS_Status(ESP_NETWORK_BLE))
-    return false; // ESP32.enableBLE(false)
-#if CENTRAL_LINK_COUNT>0
-  return (m_central_conn_handles[0] != BLE_GATT_HANDLE_INVALID);
-#else
-  return false;
-#endif
-}
-
-/** Is BLE connected to a server device at all (eg, the simple, 'slave' mode)? */
-bool jsble_has_peripheral_connection(){
-  if(!ESP32_Get_NVS_Status(ESP_NETWORK_BLE))
-    return false;
-  return (m_peripheral_conn_handle != BLE_GATT_HANDLE_INVALID);
 }
 
 /** Call this when something happens on BLE with this as
@@ -198,9 +152,10 @@ uint32_t jsble_set_scanning(bool enabled, JsVar *options){
   if (enabled) {
     if (bleStatus & BLE_IS_SCANNING) return 0;
     bleStatus |= BLE_IS_SCANNING;
-    bool activeScan = false;
+    bool activeScan = false, extended = false;
     if (enabled && jsvIsObject(options)) {
       activeScan = jsvObjectGetBoolChild(options, "active");
+      extended = jsvObjectGetBoolChild(options, "extended");
     }
     bluetooth_gap_setScan(enabled, activeScan);
   } else { // !enabled
@@ -305,19 +260,103 @@ void jsble_central_setWhitelist(uint16_t central_conn_handle, bool whitelist){
 }
 
 void jsble_update_security() {
+  /* set the security iocap & auth_req & key size & init key response key parameters to the stack*/
+  esp_ble_auth_req_t auth_req = (bleStatus & BLE_SECURITY_MITM) ? ESP_LE_AUTH_REQ_BOND_MITM : ESP_LE_AUTH_NO_BOND;
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;           //set the IO capability to No output No input
+  bool encryptUart = false;
+  bool mitmProtect = false;
+
+  JsVar *options = jsvObjectGetChildIfExists(execInfo.hiddenRoot, BLE_NAME_SECURITY);
+  if (jsvIsObject(options)) {
+    JsVar *v;
+    encryptUart = jsvObjectGetBoolChild(options, "encryptUart");
+    mitmProtect = jsvObjectGetBoolChild(options, "mitm");
+    v = jsvObjectGetChildIfExists(options, "pair");
+    if (!jsvIsUndefined(v) && !jsvGetBool(v)) {
+      bleStatus |= BLE_IS_NOT_PAIRABLE;
+    } else {
+      bleStatus &= ~BLE_IS_NOT_PAIRABLE;
+      jsWarn("pair:0 not implemented on ESP32 yet\n");
+    }
+    jsvUnLock(v);
+
+    bool display = jsvObjectGetBoolChild(options, "display");
+    bool keyboard = jsvObjectGetBoolChild(options, "keyboard");
+    if (keyboard && display) iocap = ESP_IO_CAP_KBDISP;
+    else if (keyboard) iocap = ESP_IO_CAP_IN;
+    else if (display) iocap = ESP_IO_CAP_OUT;
+  }
+
+  // If UART encryption or mitm protection status changed, we need to update flags and restart Bluetooth
+  if (((bleStatus & BLE_ENCRYPT_UART) != 0) != encryptUart || ((bleStatus & BLE_SECURITY_MITM) != 0) != mitmProtect) {
+    if (encryptUart) bleStatus |= BLE_ENCRYPT_UART;
+    else bleStatus &= ~BLE_ENCRYPT_UART;
+    if (mitmProtect) bleStatus |= BLE_SECURITY_MITM;
+    else bleStatus &= ~BLE_SECURITY_MITM;
+    // But only restart if the UART was enabled
+    if (bleStatus & BLE_NUS_INITED)
+      bleStatus |= BLE_NEEDS_SOFTDEVICE_RESTART;
+  }
+
+  uint8_t key_size = 16;      //the key size should be 7~16 bytes
+  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  uint8_t rsp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(uint8_t));
+  /* If your BLE device act as a Slave, the init_key means you hope which types of key of the master should distribut to you,
+  and the response key means which key you can distribut to the Master;
+  If your BLE device act as a master, the response key means you hope which types of key of the slave should distribut to you,
+  and the init key means which key you can distribut to the slave. */
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 }
 
 /// Return an object showing the security status of the given connection
 JsVar *jsble_get_security_status(uint16_t conn_handle) {
-  return 0;
+  JsVar *result = jsvNewWithFlags(JSV_OBJECT);
+  bool isAdvertising = bleStatus & BLE_IS_ADVERTISING;
+  jsvObjectSetBoolChild(result, "advertising", isAdvertising);
+  jsvObjectSetBoolChild(result, "connected", jsble_has_connection() || jsble_has_central_connection()); // fixme: should check the connection handle
+  if (blePeriphConnectionInterval)
+    jsvObjectSetIntChild(result, "connectionInterval", blePeriphConnectionInterval);
+  return result;
 }
 
 /// Set the transmit power of the current (and future) connections
 void jsble_set_tx_power(int8_t pwr) {
-  jsWarn("jsble_set_tx_power not implemented yet\n");
+  // convert to ESP32 power levels
+  esp_power_level_t power = ESP_PWR_LVL_N0 + (int)(pwr/3);
+  if (power<0) power=0; // ESP_PWR_LVL_N24 on C3 / ESP_PWR_LVL_N12 on ESP32
+#if CONFIG_IDF_TARGET_ESP32
+  if (power > ESP_PWR_LVL_P9) power = ESP_PWR_LVL_P9;
+#else
+  if (power > ESP_PWR_LVL_P21) power = ESP_PWR_LVL_P21;
+#endif
+  // set power levels
+  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, power);
+  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, power);
+  esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, power);
 }
 
 uint32_t jsble_central_send_passkey(uint16_t central_conn_handle, char *passkey) {
   jsWarn("central set Whitelist not implemented yet\n");
   return 0;
+}
+
+void jsble_central_eraseBonds(bool hard) {
+  int dev_num = esp_ble_get_bond_device_num();
+  if (dev_num <= 0) {
+    jsiConsolePrintf("No saved bonds found\n");
+    return;
+  }
+
+  esp_ble_bond_dev_t *dev_list = (esp_ble_bond_dev_t *)malloc(sizeof(esp_ble_bond_dev_t) * dev_num);
+  if (!dev_list) return;
+
+  esp_ble_get_bond_device_list(&dev_num, dev_list);
+  for (int i = 0; i < dev_num; i++)
+    esp_ble_remove_bond_device(dev_list[i].bd_addr);
+
+  free(dev_list);
 }

@@ -135,10 +135,72 @@ E.on('touch',t=>{
 */
 
 /*JSON{
+  "type" : "event",
+  "class" : "E",
+  "name" : "packet",
+  "params" : [
+    ["event","JsVar","The decoded JSON object representing the packet"]
+  ]
+}
+[2v25+] Called when a packet of type `EVENT` is received via [Espruino's packet upload mechanism](https://github.com/espruino/Espruino/blob/master/README_Protocol.md)
+
+The packet's contents are decoded as RJSON (fields without quotes are allowed like `{a:1}`) and passed into this event.
+
+```
+E.on('packet', e => {
+  console.log("Packet received:", e);
+});
+```
+*/
+/*JSON{
+  "type" : "event",
+  "class" : "E",
+  "name" : "packetUpload",
+  "params" : [
+    ["event","JsVar","An object containing `{ l : int, o : int, s : int, fn : string }`"]
+  ]
+}
+[2v29+] Called when a file is uploaded via [Espruino's packet upload mechanism](https://github.com/espruino/Espruino/blob/master/README_Protocol.md)
+
+This is used by `E.showMessage` for Bangle.js to show upload progress.
+
+```
+{
+  l : int, // bytes uploaded in this one packet
+  o : int, // bytes uploaded so far in the file
+  s : int, // total size of the file being uploaded
+  fn : string // filename being uploaded
+}
+```
+
+```
+E.on('packetUpload', e => {
+  console.log("Uploaded ${e.o}/${e.s} bytes to "+e.fn);
+});
+```
+*/
+/*JSON{
+  "type" : "staticproperty",
+  "class" : "E",
+  "name" : "internal",
+  "generate_full" : "jsvLockAgain(execInfo.hiddenRoot)",
+  "return" : ["JsVar","The 'hidden root'"]
+}
+(2v28+) A reference to the "hidden root" that contains
+internal Espruino JavaScript variables such as lists
+of timers and watches.
+
+On earlier firmwares this was accessible via `global["\xff"]`
+*/
+
+/*JSON{
   "type" : "staticmethod",
   "class" : "E",
   "name" : "getTemperature",
   "generate" : "jswrap_espruino_getTemperature",
+  "params" : [
+    ["internal","bool","On Puck.js (where there is an external temperature sensor), set to true to use the internal microcontroller temperature sensor, false to use the external sensor. On other devices this parameter is ignored."]
+  ],
   "return" : ["float","The temperature in degrees C"]
 }
 Use the microcontroller's internal thermistor to work out the temperature.
@@ -154,12 +216,12 @@ devices. If so it'll return NaN.
  be reading 10 over degrees C above ambient temperature. When running from
  battery with `setDeepSleep(true)` it is much more accurate though.
 */
-JsVarFloat jswrap_espruino_getTemperature() {
+JsVarFloat jswrap_espruino_getTemperature(bool internal) {
 #ifdef PUCKJS
-  return jswrap_puck_getTemperature();
-#else
-  return jshReadTemperature();
+  if (!internal)
+    return jswrap_puck_getTemperature();
 #endif
+  return jshReadTemperature();
 }
 
 /*JSON{
@@ -180,6 +242,22 @@ times and average the results.
 
 While this is implemented on Espruino boards, it may not be implemented on other
 devices. If so it'll return NaN.
+ */
+
+/*JSON{
+  "type" : "staticmethod",
+  "#if" : "defined(NRF52833) || defined(NRF52840)",
+  "class" : "E",
+  "name" : "getVDDH",
+  "generate_full" : "jshReadVDDH()",
+  "return" : ["float","The voltage on VDDH input"]
+}
+Return the voltage on VDDH input
+
+**Note:** This value is calculated by reading the voltage on an internal
+voltage reference with the ADC. It will be slightly noisy, so if you need this
+for accurate measurements we'd recommend that you call this function several
+times and average the results.
  */
 
 
@@ -358,8 +436,13 @@ JsVarFloat jswrap_espruino_sum(JsVar *arr) {
   "typescript" : "variance(arr: string | number[] | ArrayBuffer, mean: number): number;"
 }
 Work out the variance of the contents of the given Array, String or ArrayBuffer
-and return the result. This is equivalent to `v=0;for (i in arr)
-v+=Math.pow(mean-arr[i],2)`
+and return the result. This is equivalent to:
+
+```
+v=0;
+for (i in arr)
+  v+=Math.pow(mean-arr[i],2);
+````
  */
 JsVarFloat jswrap_espruino_variance(JsVar *arr, JsVarFloat mean) {
   if (!(jsvIsIterable(arr))) {
@@ -704,11 +787,12 @@ Called when a bit rises or falls above a set level. See `E.setComparator` for se
   "generate" : "jswrap_espruino_setComparator_eventHandler"
 }
 */
-void jswrap_espruino_setComparator_eventHandler(IOEvent *event) {
+void jswrap_espruino_setComparator_eventHandler(IOEventFlags eventFlags, uint8_t *data, int length) {
 #if defined(NRF52_SERIES) && !defined(SAVE_ON_FLASH)
   // see jshSetComparator / E.setComparator
-  if ((event->data.time & EVC_TYPE_MASK) == EVC_LPCOMP) {
-    JsVar *arg = jsvNewFromInteger((event->data.time & EVC_DATA_LPCOMP_UP) ? 1 : -1);
+  IOCustomEventFlags customFlags = *(IOCustomEventFlags*)data;
+  if ((customFlags & EVC_TYPE_MASK) == EVC_LPCOMP) {
+    JsVar *arg = jsvNewFromInteger((customFlags & EVC_DATA_LPCOMP_UP) ? 1 : -1);
     jsiExecuteEventCallbackOn("E",JS_EVENT_PREFIX"comparator",1,&arg);
     jsvUnLock(arg);
   }
@@ -728,7 +812,7 @@ void jswrap_espruino_setComparator_eventHandler(IOEvent *event) {
 (Added 2v25) Enable the nRF52 chip's `LPCOMP` hardware. When enabled, it creates an `E.on("comparator", ...)`
 event whenever the pin supplied rises or falls past the setpoint given (with 50mv hysteresis).
 
-```JS
+```
 E.setComparator(D28, 8/16); // compare with VDD/2
 E.on("comparator", e => {
   print(e); // 1 for up, or -1 for down
@@ -834,6 +918,11 @@ code.
 * `unsyncFiles` - When writing files, *don't* flush all data to the SD card
   after each command (the default is *to* flush). This is much faster, but can
   cause filesystem damage if power is lost without the filesystem unmounted.
+* `jitDebug` - When JIT compiling, outputs debug info to the console
+* `onErrorSave` - (2v27+) when an uncaught error occurs, write it to a
+  file called `ERROR` in Storage (the file is not updated)
+* `onErrorFlash` - (2v27+) when an uncaught error occurs, flash the red LED
+  for 200ms (only on devices with a physical LED)
 */
 /*JSON{
   "type" : "staticmethod",
@@ -1277,16 +1366,21 @@ JsVar *jswrap_espruino_memoryArea(int addr, int len) {
   ],
   "typescript" : "setBootCode(code: string, alwaysExec?: boolean): void;"
 }
-This writes JavaScript code into Espruino's flash memory, to be executed on
+This writes JavaScript code into Espruino's flash memory (`Storage`), to be executed on
 startup. It differs from `save()` in that `save()` saves the whole state of the
-interpreter, whereas this just saves JS code that is executed at boot.
+interpreter, whereas `E.setBootCode` just saves JS code that is executed at boot.
+See https://espruino.com/Saving for a full explanation.
 
 Code will be executed before `onInit()` and `E.on('init', ...)`.
 
-If `alwaysExec` is `true`, the code will be executed even after a call to
-`reset()`. This is useful if you're making something that you want to program,
-but you want some code that is always built in (for instance setting up a
-display or keyboard).
+If `alwaysExec` is `false`/`undefined`, the code will be written to a file named `.bootcde`
+in Storage and will be executed at startup or after `load()`, but not after a call to `reset()`.
+This is the same as the Web IDE's `To Flash` upload mode.
+
+If `alwaysExec` is `true`, the code is written to a file named `.bootrst` in Storage
+and will be executed even after a call to `reset()`. This is useful if you're making
+something that you want to program, but you want some code that is always built in
+(for instance setting up a display or keyboard).
 
 To remove boot code that has been saved previously, use `E.setBootCode("")`
 
@@ -1484,20 +1578,6 @@ int jswrap_espruino_reverseByte(int v) {
   return (((b * 0x0802LU & 0x22110LU) | (b * 0x8020LU & 0x88440LU)) * 0x10101LU >> 16) & 0xFF;
 }
 
-
-/*JSON{
-  "type" : "staticmethod",
-  "class" : "E",
-  "name" : "dumpTimers",
-  "ifndef" : "SAVE_ON_FLASH",
-  "generate" : "jswrap_espruino_dumpTimers"
-}
-Output the current list of Utility Timer Tasks - for debugging only
- */
-void jswrap_espruino_dumpTimers() {
-  jstDumpUtilityTimers();
-}
-
 /*JSON{
   "type" : "staticmethod",
   "class" : "E",
@@ -1542,7 +1622,8 @@ void jswrap_espruino_dumpFreeList() {
   "ifndef" : "SAVE_ON_FLASH",
   "generate" : "jswrap_e_dumpFragmentation"
 }
-Show fragmentation.
+Show fragmentation. As of 2v27 this stops at the last allocated variable
+so as to avoid outputting blank lines if memory isn't full.
 
 * ` ` is free space
 * `#` is a normal variable
@@ -1550,8 +1631,16 @@ Show fragmentation.
 * `=` represents data in a Flat String (must be contiguous)
  */
 void jswrap_e_dumpFragmentation() {
-  int l = 0;
+  // find last allocated
+  unsigned int lastAllocated = 0;
   for (unsigned int i=0;i<jsvGetMemoryTotal();i++) {
+    JsVar *v = _jsvGetAddressOf(i+1);
+    if ((v->flags&JSV_VARTYPEMASK)!=JSV_UNUSED)
+      lastAllocated = i;
+  }
+  // output data as lines
+  int l = 0;
+  for (unsigned int i=0;i<lastAllocated;i++) {
     JsVar *v = _jsvGetAddressOf(i+1);
     if ((v->flags&JSV_VARTYPEMASK)==JSV_UNUSED) {
       jsiConsolePrint(" ");
@@ -1641,7 +1730,16 @@ void jswrap_e_dumpVariables() {
   "name" : "defrag",
   "generate" : "jsvDefragment"
 }
-BETA: defragment memory!
+This defragment's Espruino's memory.
+
+While Espruino does a lot of work to avoid fragmentation (variables spread over memory)
+and can usually work around it (such as by allocating data in chunks) sometimes
+it is useful to be able to allocate a large contiguous chunk of memory, and
+if memory is low and has been fragmented it may need defragmenting in order to
+find that chunk.
+
+See `E.dumpFragmentation()` to show a map of the arrangement of variables
+within memory.
 */
 
 /*TYPESCRIPT
@@ -1970,6 +2068,7 @@ Perform a standard 32 bit CRC (Cyclic redundancy check) on the supplied data
 (one byte at a time) and return the result as an unsigned integer.
  */
 JsVar *jswrap_espruino_CRC32(JsVar *data) {
+  if (!jsvIsIterable(data)) return 0; // fix assert(0) if called with nothing in debug build
   JsvIterator it;
   jsvIteratorNew(&it, data, JSIF_EVERY_ARRAY_ELEMENT);
   uint32_t crc = 0xFFFFFFFF;
@@ -2458,7 +2557,7 @@ bool jswrap_espruino_sendUSBHID(JsVar *arr) {
 
 /*JSON{
   "type" : "staticmethod",
-  "#if" : "defined(PUCKJS) || defined(PIXLJS) || defined(BANGLEJS)",
+  "#if" : "defined(PUCKJS) || defined(PIXLJS) || defined(BANGLEJS) || defined(CUSTOM_GETBATTERY)",
   "class" : "E",
   "name" : "getBattery",
   "generate" : "jswrap_espruino_getBattery",
@@ -2482,7 +2581,7 @@ JsVarInt jswrap_espruino_getBattery() {
 
 /*JSON{
   "type" : "staticmethod",
-  "#if" : "defined(PICO) || defined(ESPRUINOWIFI) || defined(ESPRUINOBOARD)",
+  "#if" : "defined(PICO) || defined(ESPRUINOWIFI) || defined(ESPRUINOBOARD) || defined(PIPBOY)",
   "class" : "E",
   "name" : "setRTCPrescaler",
   "generate" : "jswrap_espruino_setRTCPrescaler",
@@ -2658,15 +2757,15 @@ JsVar *jswrap_espruino_getPowerUsage() {
   jsvGetProcessorPowerUsage(devices); // CPU/etc
 #ifdef LED1_PININDEX
   if (jshPinGetState(LED1_PININDEX) & JSHPINSTATE_PIN_IS_ON)
-    jsvObjectSetChildAndUnLock(devices, "LED1", jsvNewFromInteger(8000));
+    jsvObjectSetIntChild(devices, "LED1", 8000);
 #endif
 #ifdef LED2_PININDEX
   if (jshPinGetState(LED2_PININDEX) & JSHPINSTATE_PIN_IS_ON)
-    jsvObjectSetChildAndUnLock(devices, "LED2", jsvNewFromInteger(8000));
+    jsvObjectSetIntChild(devices, "LED2", 8000);
 #endif
 #ifdef LED3_PININDEX
   if (jshPinGetState(LED3_PININDEX) & JSHPINSTATE_PIN_IS_ON)
-    jsvObjectSetChildAndUnLock(devices, "LED3", jsvNewFromInteger(8000));
+    jsvObjectSetIntChild(devices, "LED3", 8000);
 #endif
   // Get data from jswrap_ files
   jswGetPowerUsage(devices);
@@ -2675,14 +2774,15 @@ JsVar *jswrap_espruino_getPowerUsage() {
   JsvObjectIterator it;
   jsvObjectIteratorNew(&it, devices);
   while (jsvObjectIteratorHasValue(&it)) {
-    total += jsvGetFloatAndUnLock(jsvObjectIteratorGetValue(&it));
+    JsVarFloat f = jsvGetFloatAndUnLock(jsvObjectIteratorGetValue(&it));
+    if (isfinite(f)) total += f;
     jsvObjectIteratorNext(&it);
   }
   jsvObjectIteratorFree(&it);
   // return object
   JsVar *usage = jsvNewObject();
   jsvObjectSetChildAndUnLock(usage, "device", devices);
-  jsvObjectSetChildAndUnLock(usage, "total", jsvNewFromFloat(total));
+  jsvObjectSetFloatChild(usage, "total", total);
   return usage;
 }
 

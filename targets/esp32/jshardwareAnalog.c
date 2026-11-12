@@ -18,6 +18,7 @@
 #include "driver/adc.h"
 #if CONFIG_IDF_TARGET_ESP32
 	#include "driver/dac.h"
+	#include "driver/rtc_io.h"
 #elif CONFIG_IDF_TARGET_ESP32C3
 	typedef enum { DAC_CHAN_0=0 , DAC_CHAN_1=1 } dac_channel_t;
 #elif CONFIG_IDF_TARGET_ESP32S3
@@ -31,6 +32,17 @@
 #define adc_channel_max 8
 
 adc_atten_t adc_channel[8];
+static bool adc_channel_setup[adc_channel_max];
+static adc_atten_t adc_channel_configured_atten[adc_channel_max];
+
+static void adcEnsureChannelConfigured(adc1_channel_t channel, int idx) {
+  if (idx < 0) return;
+  if (!adc_channel_setup[idx] || adc_channel_configured_atten[idx] != adc_channel[idx]) {
+    adc1_config_channel_atten(channel, adc_channel[idx]);
+    adc_channel_setup[idx] = true;
+    adc_channel_configured_atten[idx] = adc_channel[idx];
+  }
+}
 
 adc1_channel_t pinToAdcChannel(Pin pin){
   adc1_channel_t channel;
@@ -76,24 +88,17 @@ int pinToAdcChannelIdx(Pin pin){
   return pinInfo[pin].analog & JSH_MASK_ANALOG_CH;
 }
 
-dac_channel_t pinToDacChannel(Pin pin){
-#if CONFIG_IDF_TARGET_ESP32
-  dac_channel_t channel;
-  switch(pin){
-    case 25: channel = DAC_CHANNEL_1; break;
-    case 26: channel = DAC_CHANNEL_2; break;
-    default: channel = -1; break;
-  }
-  return channel;
-#elif CONFIG_IDF_TARGET_ESP32C3
-  jsExceptionHere(JSET_ERROR, "not implemented\n");
-  return 0;
-#elif CONFIG_IDF_TARGET_ESP32S3
-  jsExceptionHere(JSET_ERROR, "not implemented\n");
-  return 0;
-#else
-	#error Not an ESP32 or ESP32-S3
+dac_channel_t pinToDacChannel(Pin pin) {
+  JshPinFunction func = pinInfo[pin].functions[0];
+  if ((func&JSH_MASK_TYPE) != JSH_DAC) // no channel if not a DAC pin
+    return -1;
+  switch(func & JSH_MASK_INFO){
+#if CONFIG_IDF_TARGET_ESP32 // only ESP32 has DAC
+    case JSH_DAC_CH1: return DAC_CHANNEL_1;
+    case JSH_DAC_CH2: return DAC_CHANNEL_2;
 #endif
+    default: return -1;
+  }
 }
 
 void ADCReset(){
@@ -113,6 +118,7 @@ void initADC(int ADCgroup){
 #else
       adc_channel[i] = ADC_ATTEN_11db;
 #endif
+      adc_channel_setup[i] = false;
      }
     break;
   case 2:
@@ -128,22 +134,20 @@ void initADC(int ADCgroup){
 }
 
 void rangeADC(Pin pin,int range){
-  int idx,atten;
-  idx = pinToAdcChannelIdx(pin);
-  printf("idx:%d\n",idx);
+  int idx = pinToAdcChannelIdx(pin);
   if(idx >= 0){
     adc_channel[idx] = rangeToAdcAtten(range);
-    printf("Atten:%d \n",adc_channel[idx]);
+    adc_channel_setup[idx] = false;
   }
 }
 
 int readADC(Pin pin){
-  adc1_channel_t channel; int value;
+  adc1_channel_t channel;
   channel = pinToAdcChannel(pin);
   if(channel >= 0) {
-    adc1_config_channel_atten(channel,adc_channel[pinToAdcChannelIdx(pin)]);
+    int idx = pinToAdcChannelIdx(pin);
+    adcEnsureChannelConfigured(channel, idx);
 #if ESP_IDF_VERSION_MAJOR>=4
-	  // ESP_IDF 4.x - int adc1_get_voltage(adc1_channel_t channel)    //Deprecated. Use adc1_get_raw() instead
 	  int value=adc1_get_raw(channel);
 #if CONFIG_IDF_TARGET_ESP32C3
     // we need to call it twice to get a decent value on the C3 for some reason!
@@ -151,7 +155,7 @@ int readADC(Pin pin){
     value=adc1_get_raw(channel);
 #endif
 #else
-	  value = adc1_get_voltage(channel);
+	  int value = adc1_get_voltage(channel);
 #endif
     return value;
   } else return -1;
@@ -166,7 +170,10 @@ void writeDAC(Pin pin,uint8_t value){
 #if CONFIG_IDF_TARGET_ESP32
   channel = pinToDacChannel(pin);
 #if ESP_IDF_VERSION_MAJOR>=4
-  if(channel >= 0) dac_output_voltage(channel, value);
+  if(channel >= 0) {
+    dac_output_enable(channel);
+    dac_output_voltage(channel, value);
+  }
 #else
   if(channel >= 0) dac_out_voltage(channel, value);
 #endif
@@ -179,5 +186,14 @@ void writeDAC(Pin pin,uint8_t value){
 #endif
 }
 
-
-
+void disableDAC(Pin pin){
+#if CONFIG_IDF_TARGET_ESP32
+  dac_channel_t channel = pinToDacChannel(pin);
+  if(channel >= 0) {
+    dac_output_disable(channel);
+    rtc_gpio_deinit((gpio_num_t)pin);
+  }
+#else
+  NOT_USED(pin);
+#endif
+}

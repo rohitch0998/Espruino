@@ -134,29 +134,6 @@ void jswrap_pin_write(
 /*JSON{
   "type"     : "method",
   "class"    : "Pin",
-  "name"     : "writeAtTime",
-  "ifndef"   : "SAVE_ON_FLASH",
-  "generate" : "jswrap_pin_writeAtTime",
-  "params" : [
-    ["value", "bool", "Whether to set output high (true/1) or low (false/0)"],
-    ["time", "float", "Time at which to write (in seconds)"]
-  ]
-}
-Sets the output state of the pin to the parameter given at the specified time.
-
- **Note:** this **doesn't** change the mode of the pin to an output. To do that,
- you need to use `pin.write(0)` or `pinMode(pin, 'output')` first.
- */
-void jswrap_pin_writeAtTime(JsVar *parent, bool value, JsVarFloat time) {
-  Pin pin = jshGetPinFromVar(parent);
-  JsSysTime sTime = jshGetTimeFromMilliseconds(time*1000) - jshGetSystemTime();
-  jstPinOutputAtTime(sTime, NULL, &pin, 1, value);
-}
-
-
-/*JSON{
-  "type"     : "method",
-  "class"    : "Pin",
   "name"     : "getMode",
   "generate" : "jswrap_pin_getMode",
   "return"   : ["JsVar", "The pin mode, as a string"]
@@ -233,7 +210,7 @@ void jswrap_pin_pulse(JsVar *parent, bool value, JsVar *times) {
   "class"    : "Pin",
   "name" : "analog",
   "generate" : "jswrap_pin_analog",
-  "return" : ["float","The analog Value of the Pin between 0 and 1"]
+  "return" : ["float","The analog value of the `Pin` between 0(GND) and 1(VCC)"]
 }
 (Added in 2v20) Get the analogue value of the given pin. See `analogRead` for more information.
  */
@@ -282,10 +259,13 @@ Get information about this pin and its capabilities. Of the form:
 {
   "port"        : "A",    // the Pin's port on the chip
   "num"         : 12,     // the Pin's number
+  "negated"     : (2v29+) // true if the pin is negated in firmware, field missing if not
   "mode"        : (2v25+) // string: the pin's mode (same as Pin.getMode())
   "output"      : (2v25+) // 0/1: the state of the pin's output register
-  "in_addr"     : 0x..., // (if available) the address of the pin's input address in bit-banded memory (can be used with peek)
-  "out_addr"    : 0x..., // (if available) the address of the pin's output address in bit-banded memory (can be used with poke)
+  "in_addr"     : 0x..., // [2v30+] (if available) the address of the pin input register in memory (can be used with peek)
+  "set_addr"    : 0x..., // [2v30+] (if available) the address in memory to write to set this pin (can be used with poke)
+  "clr_addr"    : 0x..., // [2v30+] (if available) the address in memory to write to clear this pin (can be used with poke)
+  "mask"        : ...,   // [2v30+] (if available) the mask used to access the pin's value in in_addr/set_addr/clr_addr
   "analog"      : { ADCs : [1], channel : 12 }, // If analog input is available
   "functions"   : {
     "TIM1":{type:"CH1, af:0},
@@ -293,7 +273,7 @@ Get information about this pin and its capabilities. Of the form:
   }
 }
 ```
-Will return undefined if pin is not valid.
+Will return `undefined` if pin is not valid.
 */
 JsVar *jswrap_pin_getInfo(
     JsVar *parent //!< The class instance representing the pin.
@@ -304,20 +284,25 @@ JsVar *jswrap_pin_getInfo(
   JsVar *obj = jsvNewObject();
   if (!obj) return 0;
 
-  char buf[2];
-  buf[0] = (char)('A'+(inf->port-JSH_PORTA));
-  buf[1] = 0;
-  jsvObjectSetChildAndUnLock(obj, "port", jsvNewFromString(buf));
-  jsvObjectSetChildAndUnLock(obj, "num", jsvNewFromInteger(inf->pin-JSH_PIN0));
+  char buf[10];
+  jshGetPinString(buf, pin);
+  buf[1] = 0; // ensure we only use the first char
+  jsvObjectSetStringChild(obj, "port", buf);
+  jsvObjectSetIntChild(obj, "num", inf->pin-JSH_PIN0);
+  if (inf->port&JSH_PIN_NEGATED)
+    jsvObjectSetBoolChild(obj, "negated", true);
   JshPinState state = jshPinGetState(pin);
   jsvObjectSetChildAndUnLock(obj, "mode", jshGetPinStateString(state));
-  jsvObjectSetChildAndUnLock(obj, "output", jsvNewFromInteger((state&JSHPINSTATE_PIN_IS_ON)?1:0));
-#ifdef STM32
-  volatile uint32_t *addr;
-  addr = jshGetPinAddress(pin, JSGPAF_INPUT);
-  if (addr) jsvObjectSetChildAndUnLock(obj, "in_addr", jsvNewFromInteger((JsVarInt)addr));
-  addr = jshGetPinAddress(pin, JSGPAF_OUTPUT);
-  if (addr) jsvObjectSetChildAndUnLock(obj, "out_addr", jsvNewFromInteger((JsVarInt)addr));
+  jsvObjectSetIntChild(obj, "output", (state&JSHPINSTATE_PIN_IS_ON)?1:0);
+
+#ifndef SAVE_ON_FLASH
+  JshGetPinAddressResult a;
+  if (jshGetPinAddress(pin, &a)) {
+    jsvObjectSetIntChild(obj, "in_addr", (JsVarInt)a.in_addr);
+    jsvObjectSetIntChild(obj, "set_addr", (JsVarInt)a.set_addr);
+    jsvObjectSetIntChild(obj, "clr_addr", (JsVarInt)a.clr_addr);
+    jsvObjectSetIntChild(obj, "mask", (JsVarInt)a.mask);
+  }
 #endif
   // ADC
   if (inf->analog) {
@@ -331,8 +316,8 @@ JsVar *jswrap_pin_getInfo(
             jsvArrayPushAndUnLock(arr, jsvNewFromInteger(1+i));
         jsvObjectSetChildAndUnLock(an, "ADCs", arr);
       }
-      jsvObjectSetChildAndUnLock(an, "channel", jsvNewFromInteger(inf->analog & JSH_MASK_ANALOG_CH));
-      jsvObjectSetChildAndUnLock(obj, "channel", jsvNewFromInteger(inf->analog & JSH_MASK_ANALOG_CH)); // for backwards compatibility with 2v22 and earlier
+      jsvObjectSetIntChild(an, "channel", inf->analog & JSH_MASK_ANALOG_CH);
+      jsvObjectSetIntChild(obj, "channel", inf->analog & JSH_MASK_ANALOG_CH); // for backwards compatibility with 2v22 and earlier
       jsvObjectSetChildAndUnLock(obj, "analog", an);
     }
   }
@@ -345,8 +330,8 @@ JsVar *jswrap_pin_getInfo(
         if (func) {
           char buf[16];
           jshPinFunctionToString(inf->functions[i], JSPFTS_TYPE, buf, sizeof(buf));
-          jsvObjectSetChildAndUnLock(func, "type", jsvNewFromString(buf));
-          jsvObjectSetChildAndUnLock(func, "af", jsvNewFromInteger(inf->functions[i] & JSH_MASK_AF));
+          jsvObjectSetStringChild(func, "type", buf);
+          jsvObjectSetIntChild(func, "af", inf->functions[i] & JSH_MASK_AF);
 
           jshPinFunctionToString(inf->functions[i], JSPFTS_DEVICE|JSPFTS_DEVICE_NUMBER, buf, sizeof(buf));
           jsvObjectSetChildAndUnLock(funcs, buf, func);

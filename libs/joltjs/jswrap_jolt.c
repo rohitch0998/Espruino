@@ -103,9 +103,9 @@ To turn this connector on run `Jolt.Q0.setPower(1)`
 JsVar *jswrap_jolt_q0() {
   JsVar *o = jspNewObject(0, "Qwiic");
   if (!o) return 0;
-  jsvObjectSetChildAndUnLock(o, "sda", jsvNewFromPin(QWIIC0_PIN_SDA));
-  jsvObjectSetChildAndUnLock(o, "scl", jsvNewFromPin(QWIIC0_PIN_SCL));
-  jsvObjectSetChildAndUnLock(o, "fet", jsvNewFromPin(QWIIC0_PIN_FET));
+  jsvObjectSetPinChild(o, "sda", QWIIC0_PIN_SDA);
+  jsvObjectSetPinChild(o, "scl", QWIIC0_PIN_SCL);
+  jsvObjectSetPinChild(o, "fet", QWIIC0_PIN_FET);
   setJoltProperty("Q0", o);
   return o;
 }
@@ -142,9 +142,9 @@ To turn this connector on run `Jolt.Q1.setPower(1)`
 JsVar *jswrap_jolt_q1() {
   JsVar *o = jspNewObject(0, "Qwiic");
   if (!o) return 0;
-  jsvObjectSetChildAndUnLock(o, "sda", jsvNewFromPin(QWIIC1_PIN_SDA));
-  jsvObjectSetChildAndUnLock(o, "scl", jsvNewFromPin(QWIIC1_PIN_SCL));
-  jsvObjectSetChildAndUnLock(o, "fet", jsvNewFromPin(QWIIC1_PIN_FET));
+  jsvObjectSetPinChild(o, "sda", QWIIC1_PIN_SDA);
+  jsvObjectSetPinChild(o, "scl", QWIIC1_PIN_SCL);
+  jsvObjectSetPinChild(o, "fet", QWIIC1_PIN_FET);
   setJoltProperty("Q1", o);
   return o;
 }
@@ -179,10 +179,10 @@ To use this as a normal Qwiic connector, run `Jolt.Q2.setPower(1)`
 JsVar *jswrap_jolt_q2() {
   JsVar *o = jspNewObject(0, "Qwiic");
   if (!o) return 0;
-  jsvObjectSetChildAndUnLock(o, "sda", jsvNewFromPin(QWIIC2_PIN_SDA));
-  jsvObjectSetChildAndUnLock(o, "scl", jsvNewFromPin(QWIIC2_PIN_SCL));
-  jsvObjectSetChildAndUnLock(o, "gnd", jsvNewFromPin(QWIIC2_PIN_GND));
-  jsvObjectSetChildAndUnLock(o, "vcc", jsvNewFromPin(QWIIC2_PIN_VCC));
+  jsvObjectSetPinChild(o, "sda", QWIIC2_PIN_SDA);
+  jsvObjectSetPinChild(o, "scl", QWIIC2_PIN_SCL);
+  jsvObjectSetPinChild(o, "gnd", QWIIC2_PIN_GND);
+  jsvObjectSetPinChild(o, "vcc", QWIIC2_PIN_VCC);
   setJoltProperty("Q2", o);
   return o;
 }
@@ -217,10 +217,10 @@ To use this as a normal Qwiic connector, run `Jolt.Q3.setPower(1)`
 JsVar *jswrap_jolt_q3() {
   JsVar *o = jspNewObject(0, "Qwiic");
   if (!o) return 0;
-  jsvObjectSetChildAndUnLock(o, "sda", jsvNewFromPin(QWIIC3_PIN_SDA));
-  jsvObjectSetChildAndUnLock(o, "scl", jsvNewFromPin(QWIIC3_PIN_SCL));
-  jsvObjectSetChildAndUnLock(o, "gnd", jsvNewFromPin(QWIIC3_PIN_GND));
-  jsvObjectSetChildAndUnLock(o, "vcc", jsvNewFromPin(QWIIC3_PIN_VCC));
+  jsvObjectSetPinChild(o, "sda", QWIIC3_PIN_SDA);
+  jsvObjectSetPinChild(o, "scl", QWIIC3_PIN_SCL);
+  jsvObjectSetPinChild(o, "gnd", QWIIC3_PIN_GND);
+  jsvObjectSetPinChild(o, "vcc", QWIIC3_PIN_VCC);
   setJoltProperty("Q3", o);
   return o;
 }
@@ -606,7 +606,7 @@ void jswrap_jolt_init() {
   package don't do that as the device might be connected to something which will
   make the test keep failing.  */
   bool firstRunAfterFlash = false;
-#ifndef DFU_UPDATE_BUILD
+#ifdef ESPR_TEST_ON_FIRST_RUN
   uint32_t firstStartFlagAddr = FLASH_SAVED_CODE_START-4;
   if (firstStart) {
     // check the 4 bytes *right before* our saved code. If these are 0xFFFFFFFF
@@ -624,7 +624,7 @@ void jswrap_jolt_init() {
     // if we're doing our first run after being flashed with new firmware, we set the advertising name
     // up to say PASS or FAIL, to work with the factory test process.
     bool result = _jswrap_jolt_selfTest(firstRunAfterFlash);
-#ifndef DFU_UPDATE_BUILD
+#ifdef ESPR_TEST_ON_FIRST_RUN
     // if we passed, set the flag in flash so we don't self-test again
     if (firstRunAfterFlash && result) {
       uint32_t buf = 0;
@@ -682,17 +682,17 @@ bool jswrap_jolt_idle() {
 }*/
 void jswrap_jolt_powerusage(JsVar *devices) {
   if (!(driverMode[0]==JDM_OFF || driverMode[0]==JDM_AUTO))
-    jsvObjectSetChildAndUnLock(devices, "driver0", jsvNewFromInteger(1000));
+    jsvObjectSetIntChild(devices, "driver0", 1000);
   if (!(driverMode[1]==JDM_OFF || driverMode[1]==JDM_AUTO))
-    jsvObjectSetChildAndUnLock(devices, "driver1", jsvNewFromInteger(1000));
+    jsvObjectSetIntChild(devices, "driver1", 1000);
   int v;
   v = (int)(jshPinAnalog(JSH_PORTH_OFFSET+0) * 400);
-  if (v>10) jsvObjectSetChildAndUnLock(devices, "pin0_internal_resistance", jsvNewFromInteger(v));
+  if (v>10) jsvObjectSetIntChild(devices, "pin0_internal_resistance", v);
   v = (int)(jshPinAnalog(JSH_PORTH_OFFSET+2) * 400);
-  if (v>10) jsvObjectSetChildAndUnLock(devices, "pin2_internal_resistance", jsvNewFromInteger(v));
+  if (v>10) jsvObjectSetIntChild(devices, "pin2_internal_resistance", v);
   v = (int)(jshPinAnalog(JSH_PORTH_OFFSET+4) * 400);
-  if (v>10) jsvObjectSetChildAndUnLock(devices, "pin4_internal_resistance", jsvNewFromInteger(v));
+  if (v>10) jsvObjectSetIntChild(devices, "pin4_internal_resistance", v);
   v = (int)(jshPinAnalog(JSH_PORTH_OFFSET+6) * 400);
-  if (v>10) jsvObjectSetChildAndUnLock(devices, "pin6_internal_resistance", jsvNewFromInteger(v));
+  if (v>10) jsvObjectSetIntChild(devices, "pin6_internal_resistance", v);
 
 }

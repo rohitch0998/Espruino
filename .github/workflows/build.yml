@@ -35,17 +35,20 @@ jobs:
   # normal builds
   build_main:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_main }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     strategy:
       # devices to build for
       matrix:
-        board: [LINUX, ESP32, ESP8266_BOARD, ESP8266_4MB, MICROBIT1, MICROBIT2, ESP32C3_IDF4, XIAOBLE]
+        board: [LINUX, MICROBIT1, MICROBIT2, XIAOBLE]
       # try and build for all devices even if one fails
       fail-fast: false 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
+    - uses: actions/setup-python@v7
+      with:
+          python-version: 3.9
     - name: make ${{ matrix.board }}
       env:
         TRAVIS: 1
@@ -57,7 +60,7 @@ jobs:
         make
         ./scripts/ci_upload.sh
     - name: Upload ${{ matrix.board }} build artifact
-      uses: actions/upload-artifact@v4.6.0
+      uses: actions/upload-artifact@v7.0.2
       with:
         name: ${{ matrix.board }}
         path: |
@@ -71,17 +74,20 @@ jobs:
   # Builds with DFU_UPDATE_BUILD=1        
   build_dfu:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_dfu }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     strategy:
       # devices to build for
       matrix:
-        board: [PUCKJS, PIXLJS, JOLTJS, MDBT42Q, BANGLEJS, BANGLEJS2, PUCKJS_MINIMAL, PUCKJS_NETWORK, PIXLJS_WIZ]
+        board: [PUCKJS, PIXLJS, JOLTJS, MDBT42Q, BANGLEJS, BANGLEJS2, PUCKJS_MINIMAL, PUCKJS_NETWORK, PIXLJS_WIZ, BANGLEJS2_NOFLASH, BANGLEJS2_IFLASH]
       # try and build for all devices even if one fails
       fail-fast: false 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0    
+    - uses: actions/setup-python@v7
+      with:
+          python-version: 3.9
     - name: make ${{ matrix.board }}
       env:
         TRAVIS: 1
@@ -94,7 +100,7 @@ jobs:
         make
         ./scripts/ci_upload.sh       
     - name: Upload ${{ matrix.board }} build artifact
-      uses: actions/upload-artifact@v4.6.0
+      uses: actions/upload-artifact@v7.0.2
       with:
         name: ${{ matrix.board }}
         path: |
@@ -106,7 +112,7 @@ jobs:
   # Builds with PAD_FOR_BOOTLOADER=1
   build_padded:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_padded }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     strategy:
       # devices to build for
       matrix:
@@ -114,9 +120,12 @@ jobs:
       # try and build for all devices even if one fails
       fail-fast: false 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
+    - uses: actions/setup-python@v7
+      with:
+          python-version: 3.9
     - name: make ${{ matrix.board }}
       env:
         TRAVIS: 1
@@ -129,7 +138,7 @@ jobs:
         make
         ./scripts/ci_upload.sh 
     - name: Upload ${{ matrix.board }} build artifact
-      uses: actions/upload-artifact@v4.6.0
+      uses: actions/upload-artifact@v7.0.2
       with:
         name: ${{ matrix.board }}
         path: |
@@ -138,18 +147,19 @@ jobs:
           bin/*.tgz
           bin/*.zip
  
-  # emulator builds
-  build_emulator:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_emulator }}
-    runs-on: ubuntu-20.04
+
+  # espressif builds - do not need python 3.9
+  build_espressif:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_main }}
+    runs-on: ubuntu-24.04
     strategy:
       # devices to build for
-      matrix:  # banglejs,   banglejs2
-        board: [EMSCRIPTEN, EMSCRIPTEN2]
+      matrix:
+        board: [ESP32, ESP32C3_IDF4, ESP32S3_IDF4, ESP32_IDF4, ESP32_IDF5, ESP32S3_IDF5, ESP32C3_IDF5]
       # try and build for all devices even if one fails
       fail-fast: false 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: make ${{ matrix.board }}
@@ -163,7 +173,42 @@ jobs:
         make
         ./scripts/ci_upload.sh
     - name: Upload ${{ matrix.board }} build artifact
-      uses: actions/upload-artifact@v4.6.0
+      uses: actions/upload-artifact@v7.0.2
+      with:
+        name: ${{ matrix.board }}
+        path: |
+          bin/*.bin
+          bin/*.uf2
+          bin/*.hex
+          bin/*.tgz
+          bin/*.zip
+
+  # emulator builds
+  build_emulator:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.enable_emulator }}
+    runs-on: ubuntu-24.04
+    strategy:
+      # devices to build for
+      matrix:  # banglejs,   banglejs2
+        board: [EMSCRIPTEN, EMSCRIPTEN2]
+      # try and build for all devices even if one fails
+      fail-fast: false 
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: make ${{ matrix.board }}
+      env:
+        TRAVIS: 1
+        RELEASE: 1
+        BOARD: ${{ matrix.board }} 
+        UPLOADTOKEN: ${{ secrets.UPLOADTOKEN }}  
+      run: |
+        source ./scripts/provision.sh  ${{ matrix.board }}
+        make
+        ./scripts/ci_upload.sh
+    - name: Upload ${{ matrix.board }} build artifact
+      uses: actions/upload-artifact@v7.0.2
       with:
         name: ${{ matrix.board }}
         path: |
@@ -171,7 +216,7 @@ jobs:
  
 # Disable doc building for now 
 #  docs:
-#    runs-on: ubuntu-20.04      
+#    runs-on: ubuntu-24.04      
 #    steps:
 #    - name: makedocs
 #      run: make docs

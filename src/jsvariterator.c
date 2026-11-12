@@ -41,6 +41,10 @@ bool jsvIterateCallback(
     if (jsvIsFunction(callbackVar)) {
       JsVar *result = jspExecuteFunction(callbackVar,0,0,NULL);
       jsvUnLock(callbackVar);
+      if (jspIsInterrupted()) {
+        jsvUnLock(result);
+        return false;
+      }
       if (result) {
         bool r = jsvIterateCallback(result, callback, callbackData);
         jsvUnLock(result);
@@ -254,7 +258,14 @@ static void jsvStringIteratorCatchUp(JsvStringIterator *it) {
 }
 
 void jsvStringIteratorNew(JsvStringIterator *it, JsVar *str, size_t startIdx) {
-  assert(jsvHasCharacterData(str));
+  it->varIndex = 0;
+  if (!jsvHasCharacterData(str)) { // if not a string, set up empty iterator
+    it->var = 0;
+    it->ptr = 0;
+    it->charsInVar = 0;
+    it->charIdx = 0;
+    return;
+  }
 #ifdef ESPR_UNICODE_SUPPORT
   it->isUTF8 = jsvIsUTF8String(str);
   if (it->isUTF8) { // if it's UTF8, skip the UTF8 tag and go straight to the data
@@ -263,7 +274,6 @@ void jsvStringIteratorNew(JsvStringIterator *it, JsVar *str, size_t startIdx) {
   } else
 #endif
     it->var = jsvLockAgain(str);
-  it->varIndex = 0;
   it->charsInVar = jsvGetCharactersInVar(it->var);
 #ifdef SPIFLASH_BASE
   if (jsvIsFlashString(it->var)) {
@@ -774,7 +784,7 @@ void jsvIteratorNew(JsvIterator *it, JsVar *obj, JsvIteratorFlags flags) {
     jsvStringIteratorNew(&it->it.str, obj, 0);
   } else {
     it->type = JSVI_NONE;
-    assert(0);
+    assert(0); // getting here won't break anything, but it's good to be warned about it
   }
 }
 
@@ -931,4 +941,27 @@ void jsvIteratorClone(JsvIterator *dstit, JsvIterator *it) {
 #endif
   default: assert(0); break;
   }
+}
+
+/** Compare 2 strings, See jsvCompareString - this version uses an existing iterator for the first string (does not free it, but does advance it) */
+int jsvCompareStringIt(JsvStringIterator *ita, JsVar *vb, size_t startb, bool equalAtEndOfA, bool equalAtEndOfB) {
+  JsvStringIterator itb;
+  jsvStringIteratorNewUTF8(&itb, vb, startb);
+  // step to first positions
+  while (true) {
+    int ca = jsvStringIteratorGetUTF8CharAndNext(ita);
+    int cb = jsvStringIteratorGetUTF8CharAndNext(&itb);
+    if (ca != cb) {
+      jsvStringIteratorFree(&itb);
+      if ((ca<0) && equalAtEndOfA) return 0;
+      if ((cb<0) && equalAtEndOfB) return 0;
+      return ca - cb;
+    }
+    if (ca < 0) { // both equal, but end of string
+      jsvStringIteratorFree(&itb);
+      return 0;
+    }
+  }
+  // never get here, but the compiler warns...
+  return true;
 }

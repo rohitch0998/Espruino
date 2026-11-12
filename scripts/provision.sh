@@ -34,6 +34,7 @@ if [ "$BOARDNAME" = "ALL" ]; then
   echo "Installing dev tools for all boards"
   PROVISION_ESP32=1
   PROVISION_ESP32_IDF4=1
+  PROVISION_ESP32_IDF5=1
   PROVISION_ESP8266=1
   PROVISION_LINUX=1
   PROVISION_NRF52=1
@@ -44,38 +45,41 @@ if [ "$BOARDNAME" = "ALL" ]; then
   PROVISION_STM32F1=1
   PROVISION_STM32F4=1
   PROVISION_STM32L4=1
+  PROVISION_RP2XXX=1
   PROVISION_RASPBERRYPI=1
   PROVISION_EMSCRIPTEN=1
   PROVISION_EMSCRIPTEN2=1
 else
-  FAMILY=`scripts/get_board_info.py $BOARDNAME 'board.chip["family"]'`
+  FAMILY=$(scripts/get_board_info.py "$BOARDNAME" 'board.chip["family"]')
   if [ "$FAMILY" = "" ]; then
     echo "UNKNOWN BOARD ($BOARDNAME)"
     return 1
   fi
-  export PROVISION_$FAMILY=1
-  export PROVISION_$BOARDNAME=1
-  if python scripts/get_makefile_decls.py $BOARDNAME | grep NRF_SDK17; then
+  export PROVISION_"$FAMILY"=1
+  export PROVISION_"$BOARDNAME"=1
+  if python scripts/get_makefile_decls.py "$BOARDNAME" | grep NRF_SDK17; then
     PROVISION_NRF_SDK17=1
   fi
-  if python scripts/get_makefile_decls.py $BOARDNAME | grep NRF_SDK15_3; then
+  if python scripts/get_makefile_decls.py "$BOARDNAME" | grep NRF_SDK15_3; then
     PROVISION_NRF_SDK15_3=1
-  elif python scripts/get_makefile_decls.py $BOARDNAME | grep NRF_SDK15; then
+  elif python scripts/get_makefile_decls.py "$BOARDNAME" | grep NRF_SDK15; then
     PROVISION_NRF_SDK15=1
   fi
 fi
-echo Provision BOARDNAME = $BOARDNAME
-echo Provision FAMILY = $FAMILY
+echo Provision BOARDNAME = "$BOARDNAME"
+echo Provision FAMILY = "$FAMILY"
+
+if pip --version 2>/dev/null; then
+  echo Python/pip installed
+else
+  echo Installing python/pip
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y python python3-pip
+fi
+echo Python version "$(python --version)"
 
 if [ "$PROVISION_ESP32" = "1" ]; then
-    echo ===== ESP32
+    echo "===== ESP32"
     # needed for esptool for merging binaries
-    if pip --version 2>/dev/null; then
-      echo python/pip installed
-    else
-      echo Installing python/pip pyserial
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y python python3-pip
-    fi
     if pip list 2>/dev/null | grep pyserial >/dev/null; then
       echo pyserial installed;
     else
@@ -102,31 +106,46 @@ if [ "$PROVISION_ESP32" = "1" ]; then
            echo "Folder found"
         fi
     fi
-    echo ESP_IDF_PATH=`pwd`/esp-idf
-    echo ESP_APP_TEMPLATE_PATH=`pwd`/app
-    echo "PATH=\$PATH:`pwd`/xtensa-esp32-elf/bin/"
-    export ESP_IDF_PATH=`pwd`/esp-idf
-    export ESP_APP_TEMPLATE_PATH=`pwd`/app
-    export PATH=$PATH:`pwd`/xtensa-esp32-elf/bin/
-    echo GCC is $(which xtensa-esp32-elf-gcc)
+    echo "ESP_IDF_PATH=$(pwd)/esp-idf"
+    echo "ESP_APP_TEMPLATE_PATH=$(pwd)/app"
+    echo "PATH=\$PATH:$(pwd)/xtensa-esp32-elf/bin/"
+    export ESP_IDF_PATH=$(pwd)/esp-idf
+    export ESP_APP_TEMPLATE_PATH=$(pwd)/app
+    export PATH=$PATH:$(pwd)/xtensa-esp32-elf/bin/
+    echo GCC is "$(which xtensa-esp32-elf-gcc)"
 fi
 #--------------------------------------------------------------------------------
 if [ "$PROVISION_ESP32_IDF4" = "1" ]; then
-    echo ===== ESP32 IDF4
+    echo "===== ESP32 IDF4"
     # SDK
     if [ ! -d "esp-idf-4" ]; then
         echo installing esp-idf folder
         mkdir esp-idf-4
-        cd esp-idf-4
-        git clone -b v4.4.8 --recursive https://github.com/espressif/esp-idf.git
+        cd esp-idf-4 || exit
+        git clone -b v4.4.8 --depth=1 --recursive --shallow-submodules https://github.com/espressif/esp-idf.git
         esp-idf/install.sh			# RIC if not specifying the target, it installs all of them for now, selected targets are: esp32c3, esp32, esp32s2, esp32h2, esp32s3
         cd ..
     fi
     source esp-idf-4/esp-idf/export.sh
 fi
 #--------------------------------------------------------------------------------
+if [ "$PROVISION_ESP32_IDF5" = "1" ]; then
+    echo "===== ESP32 IDF5"
+    # SDK
+    if [ ! -d "esp-idf-5" ]; then
+        echo installing esp-idf folder
+        mkdir esp-idf-5
+        cd esp-idf-5 || exit
+        git clone -b v5.5.3 --depth=1 --recursive --shallow-submodules https://github.com/espressif/esp-idf.git
+        esp-idf/install.sh			# RIC if not specifying the target, it installs all of them for now, selected targets are: esp32c3, esp32, esp32s2, esp32h2, esp32s3
+        cd ..
+    fi
+    source esp-idf-5/esp-idf/export.sh
+    export ESP_IDF_PATH=$IDF_PATH
+fi
+#--------------------------------------------------------------------------------
 if [ "$PROVISION_ESP8266" = "1" ]; then
-    echo ===== ESP8266
+    echo "===== ESP8266"
     if [ ! -d "ESP8266_NONOS_SDK-2.2.1" ]; then
         echo ESP8266_NONOS_SDK-2.2.1
         curl -Ls https://github.com/espruino/EspruinoBuildTools/raw/master/esp8266/ESP8266_NONOS_SDK-2.2.1.tar.gz | tar xfz - --no-same-owner
@@ -140,21 +159,21 @@ if [ "$PROVISION_ESP8266" = "1" ]; then
         fi
 
     fi
-    export ESP8266_SDK_ROOT=`pwd`/ESP8266_NONOS_SDK-2.2.1
-    export PATH=$PATH:`pwd`/xtensa-lx106-elf/bin/
-    echo GCC is $(which xtensa-lx106-elf-gcc)
+    export ESP8266_SDK_ROOT=$(pwd)/ESP8266_NONOS_SDK-2.2.1
+    export PATH=$PATH:$(pwd)/xtensa-lx106-elf/bin/
+    echo GCC is "$(which xtensa-lx106-elf-gcc)"
 fi
 #--------------------------------------------------------------------------------
 if [ "$PROVISION_LINUX" = "1" ]; then
-    echo ===== LINUX
+    echo "===== LINUX"
 fi
 #--------------------------------------------------------------------------------
 if [ "$PROVISION_RASPBERRYPI" = "1" ]; then
-    echo ===== RASPBERRYPI
+    echo "===== RASPBERRYPI"
     if [ ! -d "targetlibs/raspberrypi" ]; then
         echo Installing Raspberry pi tools
         mkdir targetlibs/raspberrypi
-        cd targetlibs/raspberrypi
+        cd targetlibs/raspberrypi || exit
         git clone --depth=1 https://github.com/raspberrypi/tools
         # wiringpi?
         cd ../..
@@ -162,17 +181,14 @@ if [ "$PROVISION_RASPBERRYPI" = "1" ]; then
 fi
 #--------------------------------------------------------------------------------
 if [ "$PROVISION_NRF52" = "1" ]; then
-    echo ===== NRF52
-    if ! type pip 2> /dev/null > /dev/null; then
-      echo Installing python and pip
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y python python-pip
-    fi
+    echo "===== NRF52"
     if ! type nrfutil 2> /dev/null > /dev/null; then
+      #echo Installing nrfutil
+      # nrfutil keeps changing and having different syntax. Absolute nightmare
       echo Installing nrfutil
-      sudo pip install --ignore-installed nrfutil protobuf==3.17.3
-      # --ignore-installed is used because pip 10 fails because PyYAML was already installed by the system
-      # protobuf-3.17.3 is required because it seems protobuf-3.18 which auto-installs as of ~15 sept 2021 is incompatible with Python 2.7
-      # -q can be used to silence the above
+      wget -O scripts/nrfutil https://github.com/espruino/EspruinoBuildTools/raw/refs/heads/master/nrf52/nrfutil
+      chmod a+x scripts/nrfutil
+      scripts/nrfutil install nrf5sdk-tools
     fi
     ARM=1
 
@@ -191,9 +207,9 @@ if [ "$PROVISION_NRF_SDK15" = "1" ]; then
         rm -rf nRF5_SDK_15.0.0_a53641a/external
         cp -r nRF5_SDK_15.0.0_a53641a/* targetlibs/nrf5x_15
         rm -rf nRF5_SDK_15.0.0_a53641a.zip nRF5_SDK_15.0.0_a53641a
-        echo ======================================================
+        echo "======================================================"
         echo "FIXME - SDK15 NFC patches don't apply cleanly"
-        echo ======================================================
+        echo "======================================================"
         cat targetlibs/nrf5x_15/patches/* | patch -p1 || true
     fi
 fi
@@ -207,9 +223,9 @@ if [ "$PROVISION_NRF_SDK15_3" = "1" ]; then
         rm -rf nRF5_SDK_15.3.0_59ac345/external
         cp -r nRF5_SDK_15.3.0_59ac345/* targetlibs/nrf5x_15_3
         rm -rf nRF5_SDK_15.3.0_59ac345.zip nRF5_SDK_15.3.0_59ac345
-        echo ======================================================
+        echo "======================================================"
         echo "FIXME - SDK15 NFC patches don't apply cleanly"
-        echo ======================================================
+        echo "======================================================"
         cat targetlibs/nrf5x_15_3/patches/* | patch -p1 || true
     fi
 fi
@@ -223,7 +239,7 @@ if [ "$PROVISION_NRF_SDK17" = "1" ]; then
         rm -rf nRF5_SDK_17.0.2_d674dde/external
         cp -r nRF5_SDK_17.0.2_d674dde/* targetlibs/nrf5x_17
         rm -rf nRF5_SDK_17.zip nRF5_SDK_17.0.2_d674dde
-        echo ======================================================
+        echo "======================================================"
         cat targetlibs/nrf5x_17/patches/* | patch -p1
     fi
 fi
@@ -244,6 +260,10 @@ if [ "$PROVISION_STM32L4" = "1" ]; then
     ARM=1
 fi
 #--------------------------------------------------------------------------------
+if [ "$PROVISION_STM32F7" = "1" ]; then
+    ARM=1
+fi
+#--------------------------------------------------------------------------------
 if [ "$PROVISION_EFM32GG" = "1" ]; then
     ARM=1
 fi
@@ -252,14 +272,78 @@ if [ "$PROVISION_SAMD" = "1" ]; then
     ARM=1
 fi
 #--------------------------------------------------------------------------------
+if [ "$PROVISION_RP2XXX" = "1" ]; then
+    echo "===== RP2XXX"
+    ARM=1
+    RP2_SDK_VERSION="2.1.1"
+    RP2_PICOTOOL_INSTALL="$(pwd)/picotool-install"
+
+    if cmake --version >/dev/null 2>&1; then
+      echo "cmake installed"
+    else
+      echo "Installing cmake"
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y cmake
+    fi
+
+    if ninja --version >/dev/null 2>&1; then
+      echo "ninja installed"
+    else
+      echo "Installing ninja-build"
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y ninja-build
+    fi
+
+    # RP2040 and RP2350 share this one checkout, so make sure it's the version we expect
+    if [ ! -d "pico-sdk" ]; then
+      echo "Installing pico-sdk $RP2_SDK_VERSION"
+      git clone --depth=1 -b "$RP2_SDK_VERSION" https://github.com/raspberrypi/pico-sdk.git
+      RP2_SDK_UPDATED=1
+    elif [ "$(git -C pico-sdk describe --tags --exact-match HEAD 2>/dev/null)" = "$RP2_SDK_VERSION" ]; then
+      echo "pico-sdk $RP2_SDK_VERSION found"
+    else
+      echo "pico-sdk is not $RP2_SDK_VERSION - switching"
+      git -C pico-sdk fetch --depth=1 origin "refs/tags/$RP2_SDK_VERSION:refs/tags/$RP2_SDK_VERSION"
+      git -C pico-sdk checkout "$RP2_SDK_VERSION"
+      RP2_SDK_UPDATED=1
+    fi
+
+    # TinyUSB is a submodule and the clone above is shallow, so fetch it explicitly
+    if [ "$RP2_SDK_UPDATED" = "1" ] || [ ! -f "pico-sdk/lib/tinyusb/src/tusb.h" ]; then
+      echo "Initialising pico-sdk TinyUSB submodule"
+      git -C pico-sdk submodule update --init --depth=1 lib/tinyusb
+    fi
+
+    if [ ! -x "$RP2_PICOTOOL_INSTALL/picotool/picotool" ]; then
+      echo "Installing host picotool"
+      if [ ! -d "picotool-src" ]; then
+        git clone --depth=1 -b "$RP2_SDK_VERSION" https://github.com/raspberrypi/picotool.git picotool-src
+      fi
+      cmake -S picotool-src -B picotool-src/build \
+        -DPICO_SDK_PATH="$(pwd)/pico-sdk" \
+        -DPICOTOOL_NO_LIBUSB=1 \
+        -DPICOTOOL_FLAT_INSTALL=1 \
+        -DCMAKE_INSTALL_PREFIX="$RP2_PICOTOOL_INSTALL"
+      cmake --build picotool-src/build
+      cmake --install picotool-src/build
+    else
+      echo "host picotool installation found"
+    fi
+
+    export PICO_SDK_PATH="$(pwd)/pico-sdk"
+    export picotool_DIR="$RP2_PICOTOOL_INSTALL/picotool"
+    export PATH="$RP2_PICOTOOL_INSTALL/picotool:$PATH"
+    echo "PICO_SDK_PATH=$PICO_SDK_PATH"
+    echo "picotool_DIR=$picotool_DIR"
+fi
+#--------------------------------------------------------------------------------
 
 
 if [ "$ARM" = "1" ]; then
     # defaulting to ARM
-    echo ===== ARM
+    echo "===== ARM"
     EXPECTEDARMGCCVERSION="13.2.1"
     EXPECTEDARMGCCFILENAME="arm-gnu-toolchain-13.2.Rel1-x86_64-arm-none-eabi"
-    if type arm-none-eabi-gcc 2> /dev/null > /dev/null; then
+
+    if type arm-none-eabi-gcc 2> /dev/null > /dev/null && [[ -z $IGNORE_SYSTEM_GCC ]]; then
         ARMGCCVERSION=$(arm-none-eabi-gcc -dumpfullversion)
         echo arm-none-eabi-gcc installed, version $ARMGCCVERSION
         if [ ! "$ARMGCCVERSION" = "$EXPECTEDARMGCCVERSION" ]; then
@@ -270,7 +354,8 @@ if [ "$ARM" = "1" ]; then
           echo "***                                                               ***"
           echo "***   The build may work with your compiler version, but it       ***"
           echo "***   is possible you will encounter errors, or issues with       ***"
-          echo "***   build size                                                  ***"
+          echo "***   build size. If you wish to ignore the installed version     ***"
+          echo "***   and install and embedded version set IGNORE_SYSTEM_GCC=1    ***"
           echo "***                                                               ***"
           echo "*********************************************************************"
           echo "*********************************************************************"
@@ -278,18 +363,20 @@ if [ "$ARM" = "1" ]; then
           echo "      Got      $ARMGCCVERSION"
         fi
     else
-        echo "installing gcc-arm-embedded to Espruino/$EXPECTEDARMGCCFILENAME/bin"
         #sudo add-apt-repository -y ppa:team-gcc-arm-embedded/ppa
         #sudo apt-get update
         #sudo DEBIAN_FRONTEND=noninteractive apt-get --force-yes --yes install libsdl1.2-dev gcc-arm-embedded
         # OR download from https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi.tar.xz
         # Unpack from GitHub-hosted file - newer, and much faster
         if [ ! -d "$EXPECTEDARMGCCFILENAME" ]; then
+          echo "installing gcc-arm-embedded to Espruino/$EXPECTEDARMGCCFILENAME/bin"
           curl -Ls "https://github.com/espruino/EspruinoBuildTools/raw/master/arm/arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi-stripped.tar.xz" | tar xfJ - --no-same-owner
         else
-            echo "Folder found"
+            echo "gcc-arm-embedded installation found"
         fi
-	      export PATH=$PATH:`pwd`/$EXPECTEDARMGCCFILENAME/bin
+
+        ARMGCCPATH="$(pwd)/$EXPECTEDARMGCCFILENAME/bin"
+        [[ ":$PATH:" != *":$ARMGCCPATH"* ]] && export PATH="$ARMGCCPATH:${PATH}"
     fi
 fi
 
@@ -297,11 +384,11 @@ fi
 EMSCRIPTEN_VERSION="3.1.54"
 
 if [ "$PROVISION_EMSCRIPTEN" = "1" ] || [ "$PROVISION_EMSCRIPTEN2" = "1" ]; then
-    echo ===== EMULATOR
+    echo "===== EMULATOR"
     echo Installing Emscripten $EMSCRIPTEN_VERSION
     if [ ! -d "targetlibs/emscripten/emsdk" ]; then
         mkdir targetlibs/emscripten
-        cd targetlibs/emscripten
+        cd targetlibs/emscripten || exit
         git clone --depth=1 https://github.com/emscripten-core/emsdk
         cd ../..
     fi

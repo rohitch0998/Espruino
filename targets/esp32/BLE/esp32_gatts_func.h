@@ -41,7 +41,10 @@ struct gatts_service_inst {
   uint16_t num_handles;
   ble_uuid_t ble_uuid;
   uint16_t uuid16;
+  uint16_t mtu;
+  esp_bd_addr_t bda; // device address
   BLEServiceFlags serviceFlag;
+  bool isPeripheral; // is this for a peripheral connection (being connected *to*) or central (connecting to other stuff)
 };
 
 struct gatts_char_inst {
@@ -74,7 +77,7 @@ void gatts_set_services(JsVar *data);
 void gatts_update_service(uint16_t char_handle, char *data, int len, bool isNotify, bool isIndicate);
 
 uint16_t gatts_get_service_cnt();
-void gatts_reset(bool removeValues);
+bool gatts_reset(bool removeValues);
 
 // For BLE UART
 void gatts_sendNUSNotification(int c);

@@ -37,7 +37,7 @@ JsVar *jswrap_graphics_createImage(JsVar *data);
 
 int jswrap_graphics_getWidthOrHeight(JsVar *parent, bool height);
 int jswrap_graphics_getBPP(JsVar *parent);
-JsVar *jswrap_graphics_reset(JsVar *parent);
+JsVar *jswrap_graphics_reset(JsVar *parent, JsVar *usage);
 JsVar *jswrap_graphics_clear(JsVar *parent, bool resetState);
 JsVar *jswrap_graphics_fillRect(JsVar *parent, JsVar *opt, int y1, int x2, int y2);
 JsVar *jswrap_graphics_clearRect(JsVar *parent, JsVar *opt, int y1, int x2, int y2);
@@ -55,9 +55,11 @@ unsigned int jswrap_graphics_blendColor(JsVar *parent, JsVar *ca, JsVar *cb, JsV
 JsVar *jswrap_graphics_setColorX(JsVar *parent, JsVar *r, JsVar *g, JsVar *b, bool isForeground);
 JsVarInt jswrap_graphics_getColorX(JsVar *parent, bool isForeground);
 JsVar *jswrap_graphics_setClipRect(JsVar *parent, int x1, int y1, int x2, int y2);
+JsVar *jswrap_graphics_setOffset(JsVar *parent, int x, int y);
 JsVar *jswrap_graphics_setFontSizeX(JsVar *parent, int size, bool isVectorFont);
 JsVar *jswrap_graphics_setFontCustom(JsVar *parent, JsVar *bitmap, int firstChar, JsVar *width, int height);
 JsVar *jswrap_graphics_setFontPBF(JsVar *parent, JsVar *file, int scale);
+JsVar *jswrap_graphics_findFont(JsVar *parent, JsVar *text, JsVar *options);
 JsVar *jswrap_graphics_setFontAlign(JsVar *parent, int x, int y, int r);
 JsVar *jswrap_graphics_setFont(JsVar *parent, JsVar *name, int size);
 JsVar *jswrap_graphics_getFont(JsVar *parent);
@@ -72,7 +74,7 @@ JsVar* jswrap_graphics_stringMetrics(JsVar *parent, JsVar *var);
 JsVar *jswrap_graphics_getVectorFontPolys(JsGraphics *gfx, JsVar *var, JsVar *options);
 JsVar *jswrap_graphics_drawLine(JsVar *parent, int x1, int y1, int x2, int y2);
 JsVar *jswrap_graphics_drawLineAA(JsVar *parent, double x1, double y1, double x2, double y2);
-JsVar *jswrap_graphics_lineTo(JsVar *parent, int x, int y);
+JsVar *jswrap_graphics_lineTo(JsVar *parent, int x, int y, int w);
 JsVar *jswrap_graphics_moveTo(JsVar *parent, int x, int y);
 JsVar *jswrap_graphics_drawPoly_X(JsVar *parent, JsVar *poly, bool closed, bool antiAlias);
 JsVar *jswrap_graphics_fillPoly_X(JsVar *parent, JsVar *poly, bool antiAlias);
@@ -152,4 +154,6 @@ void _jswrap_drawImageLayerStartX(GfxDrawImageLayer *l);
 void _jswrap_drawImageLayerNextX(GfxDrawImageLayer *l);
 void _jswrap_drawImageLayerNextXRepeat(GfxDrawImageLayer *l);
 void _jswrap_drawImageLayerNextY(GfxDrawImageLayer *l);
+// Called by _jswrap_drawImageSimple to blit out a row
+void _jswrap_drawImageSimpleRow(JsGraphics *gfx, int xPos, int y, GfxDrawImageInfo *img, JsvStringIterator *it, JsGraphicsSetPixelFn setPixel, int *_bits, uint32_t *_colData);
 void _jswrap_drawImageSimple(JsGraphics *gfx, int xPos, int yPos, GfxDrawImageInfo *img, JsvStringIterator *it, bool parseFullImage);

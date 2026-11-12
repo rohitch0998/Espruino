@@ -53,7 +53,7 @@ static JsVar *matchfound(JsvStringIterator *txtIt, matchInfo info) {
     jsvSetArrayItem(rmatch, i+1, matchStr);
     jsvUnLock(matchStr);
   }
-  jsvObjectSetChildAndUnLock(rmatch, "index", jsvNewFromInteger((JsVarInt)info.startIndex));
+  jsvObjectSetIntChild(rmatch, "index", (JsVarInt)info.startIndex);
   jsvObjectSetChild(rmatch, "input", info.sourceStr);
 
   return rmatch;
@@ -213,9 +213,13 @@ static JsVar *matchhere(char *regexp, JsvStringIterator *txtIt, matchInfo info) 
       return nomatchfound(regexp+1, info); // not the end, it's a fail
   }
   if (regexp[0] == '(') {
+    if (info.groups>=MAX_GROUPS) {
+      jsExceptionHere(JSET_ERROR, "Too many groups");
+      return 0;
+    }
     info.groupStart[info.groups] = jsvStringIteratorGetIndex(txtIt);
     info.groupEnd[info.groups] = info.groupStart[info.groups];
-    if (info.groups<MAX_GROUPS) info.groups++;
+    info.groups++;
     if (!jspCheckStackPosition()) return 0;
     return matchhere(regexp+1, txtIt, info);
   }
@@ -316,7 +320,7 @@ JsVar *jswrap_regexp_constructor(JsVar *str, JsVar *flags) {
     else
       jsvObjectSetChild(r, "flags", flags);
   }
-  jsvObjectSetChildAndUnLock(r, "lastIndex", jsvNewFromInteger(0));
+  jsvObjectSetIntChild(r, "lastIndex", 0);
 #ifndef ESPR_NO_REGEX_OPTIMISE
   /* Quick shortcut - if we were using regex just to find the end of a string (eg just
   normal chars and then $ at the end), do it with a single string compare which is faster.
@@ -394,10 +398,10 @@ JsVar *jswrap_regexp_exec(JsVar *parent, JsVar *arg) {
   JsVar *endsWith = jsvObjectGetChildIfExists(parent, "endsWith");
   if (endsWith) {
     int idx = (int)jsvGetStringLength(arg) - (int)jsvGetStringLength(endsWith);
-    if ((lastIndex <= idx) && jsvCompareString(arg, endsWith, (size_t)idx,0,true)==0) {
+    if ((lastIndex <= idx) && jsvCompareString(arg, endsWith, (size_t)idx,0,false,false)==0) {
       JsVar *rmatch = jsvNewEmptyArray();
       jsvSetArrayItem(rmatch, 0, endsWith);
-      jsvObjectSetChildAndUnLock(rmatch, "index", jsvNewFromInteger(idx));
+      jsvObjectSetIntChild(rmatch, "index", idx);
       jsvObjectSetChildAndUnLock(rmatch, "input", str);
       jsvUnLock(endsWith);
       return rmatch;
@@ -434,7 +438,7 @@ JsVar *jswrap_regexp_exec(JsVar *parent, JsVar *arg) {
     } else
       lastIndex = 0;
   }
-  jsvObjectSetChildAndUnLock(parent, "lastIndex", jsvNewFromInteger(lastIndex));
+  jsvObjectSetIntChild(parent, "lastIndex", lastIndex);
   return rmatch;
 }
 

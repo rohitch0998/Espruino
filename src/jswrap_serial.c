@@ -22,6 +22,7 @@
 #endif
 #ifdef BLUETOOTH
 #include "jswrap_bluetooth.h"
+#include "bluetooth_common.h"
 #endif
 
 /*JSON{
@@ -100,23 +101,6 @@ Espruino boards)
  */
 // this is created in jsiIdle based on EV_SERIALx_STATUS ecents
 
-/*JSON{
-  "type" : "staticmethod",
-  "class" : "Serial",
-  "name" : "find",
-  "deprecated" : true,
-  "ifndef" : "SAVE_ON_FLASH",
-  "generate_full" : "jshGetDeviceObjectFor(JSH_USART1, JSH_USARTMAX, pin)",
-  "params" : [
-    ["pin","pin","A pin to search with"]
-  ],
-  "return" : ["JsVar","An object of type `Serial`, or `undefined` if one couldn't be found."]
-}
-Try and find a USART (Serial) hardware device that will work on this pin (e.g.
-`Serial1`)
-
-May return undefined if no device can be found.
-*/
 
 
 /*JSON{
@@ -323,7 +307,7 @@ void jswrap_serial_setup(JsVar *parent, JsVar *baud, JsVar *options) {
   }
 
   // Set baud rate in object, so we can initialise it on startup
-  jsvObjectSetChildAndUnLock(parent, USART_BAUDRATE_NAME, jsvNewFromInteger(inf.baudRate));
+  jsvObjectSetIntChild(parent, USART_BAUDRATE_NAME, inf.baudRate);
   // Do the same for options
   if (options)
     jsvObjectSetChildAndUnLock(parent, DEVICE_OPTIONS_NAME, options);
@@ -501,14 +485,14 @@ Serial1.inject('Hello World');
 This is most useful if you wish to send characters to Espruino's REPL (console)
 while it is on another device.
  */
-static void _jswrap_serial_inject_cb(int data, void *userData) {
-  IOEventFlags device = *(IOEventFlags*)userData;
-  jshPushIOCharEvent(device, (char)data);
+static void _jswrap_serial_inject_cb(unsigned char *data, unsigned int len, void *callbackData) {
+  IOEventFlags device = *(IOEventFlags*)callbackData;
+  jshPushIOCharEvents(device, (char*)data, len);
 }
 void jswrap_serial_inject(JsVar *parent, JsVar *args) {
   IOEventFlags device = jsiGetDeviceFromClass(parent);
   if (!DEVICE_IS_SERIAL(device)) return;
-  jsvIterateCallback(args, _jswrap_serial_inject_cb, (void*)&device);
+  jsvIterateBufferCallback(args, _jswrap_serial_inject_cb, (void*)&device);
 }
 
 /*JSON{

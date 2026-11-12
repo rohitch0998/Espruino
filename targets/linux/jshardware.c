@@ -628,8 +628,8 @@ bool jshGetWatchedPinState(IOEventFlags device) {
   return false;
 }
 
-bool jshIsEventForPin(IOEvent *event, Pin pin) {
-  return IOEVENTFLAGS_GETTYPE(event->flags) == pinToEVEXTI(pin);
+bool jshIsEventForPin(IOEventFlags eventFlags, Pin pin) {
+  return IOEVENTFLAGS_GETTYPE(eventFlags) == pinToEVEXTI(pin);
 }
 
 void jshUSARTSetup(IOEventFlags device, JshUSARTInfo *inf) {
@@ -843,8 +843,8 @@ JsVar *jshFlashGetFree() {
   uint32_t pAddr, pSize;
   JsVar *jsArea = jsvNewObject();
   if (!jsArea) return jsFreeFlash;
-  jsvObjectSetChildAndUnLock(jsArea, "addr", jsvNewFromInteger(FLASH_START));
-  jsvObjectSetChildAndUnLock(jsArea, "length", jsvNewFromInteger(FAKE_FLASH_BLOCKSIZE*FAKE_FLASH_BLOCKS));
+  jsvObjectSetIntChild(jsArea, "addr", FLASH_START);
+  jsvObjectSetIntChild(jsArea, "length", FAKE_FLASH_BLOCKSIZE*FAKE_FLASH_BLOCKS);
   jsvArrayPushAndUnLock(jsFreeFlash, jsArea);
   return jsFreeFlash;
 }

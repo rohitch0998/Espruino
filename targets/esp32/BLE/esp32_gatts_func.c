@@ -18,6 +18,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_gap_ble_api.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "BLE/esp32_gatts_func.h"
 #include "BLE/esp32_gap_func.h"
@@ -25,11 +27,13 @@
 
 #include "bluetooth.h"
 #include "bluetooth_utils.h"
+#include "bluetooth_common.h"
 
 #include "jsutils.h"
 #include "jsparse.h"
 #include "jsinteractive.h"
 #include "jstimer.h"
+#include "jswrap_bluetooth.h"
 
 ble_uuid_t uart_service_uuid = {
   .type = BLE_UUID_TYPE_128,
@@ -57,21 +61,27 @@ uint16_t ble_char_pos = (uint16_t)-1;
 uint16_t ble_char_cnt = 0;
 uint16_t ble_descr_pos = (uint16_t)-1;
 uint16_t ble_descr_cnt = 0;
+uint16_t ble_mtu_len = 23;
 
+/// gatts_service appears to carry information on the active BLE peripheral connection as well
 struct gatts_service_inst *gatts_service = NULL;
 struct gatts_char_inst *gatts_char = NULL;
 struct gatts_descr_inst *gatts_descr = NULL;
 
 bool _removeValues;
+static volatile bool gatts_reset_in_progress = false;
+static SemaphoreHandle_t gatts_reset_complete = NULL;
+
+#define GATTS_RESET_TIMEOUT_MS 5000
 
 void jshSetDeviceInitialised(IOEventFlags device, bool isInit);
 
-esp_gatt_if_t uart_gatts_if;
-uint16_t uart_tx_handle;
+int uart_gatts_service = -1;
+uint16_t uart_tx_handle, uart_rx_handle;
 bool uart_gatts_connected = false;
 
 /// Bluetooth UART transmit data
-uint8_t nusBuffer[BLE_NUS_MAX_DATA_LEN];
+uint8_t nusBuffer[ESP_GATT_MTU_SIZE];
 /// Amount of characters ready to send in Bluetooth UART
 volatile uint8_t nusBufferLen = 0;
 
@@ -89,28 +99,36 @@ uint16_t bleGetGATTHandle(ble_uuid_t char_uuid) {
   return BLE_GATT_HANDLE_INVALID;
 }
 
-void sendNotifBuffer() {
-  if(uart_gatts_if != ESP_GATT_IF_NONE){
-    /*esp_err_t err = */esp_ble_gatts_send_indicate(uart_gatts_if,0,uart_tx_handle,nusBufferLen,nusBuffer,false);
+
+static void gatts_sendNUSNotification_txBuffer() {
+  if(uart_gatts_service>=0) {
+    /*esp_err_t err = */esp_ble_gatts_send_indicate(gatts_service[uart_gatts_service].gatts_if,0,uart_tx_handle,nusBufferLen,nusBuffer,false);
     // check error? resend if there was one? I think this just blocks if it can't send immediately
+    // We can use ESP_GATTS_CONGEST_EVT: param->congest.congested = true will happen when we're sending too much, and we should
+    // avoid sending any more. Then we'll get another one with congested = false
   }
   nusBufferLen = 0;
 }
 void gatts_sendNUSNotification(int c) {
-  if (nusBufferLen >= BLE_NUS_MAX_DATA_LEN)
-    sendNotifBuffer();
+  if(uart_gatts_service<0) return; // no service yet!
+
+  int mtu = gatts_service[uart_gatts_service].mtu - 3;
+  if (mtu > sizeof(nusBuffer)) mtu = sizeof(nusBuffer);
+
+  if (nusBufferLen >= mtu)
+    gatts_sendNUSNotification_txBuffer();
   // Add this character to our buffer
   nusBuffer[nusBufferLen] = (uint8_t)c;
   nusBufferLen++;
   // If our buffer is full, send right away
-  if(nusBufferLen >= BLE_NUS_MAX_DATA_LEN) {
-    sendNotifBuffer();
+  if(nusBufferLen >= mtu) {
+    gatts_sendNUSNotification_txBuffer();
   }
   // otherwise, we'll wait until we hit idle next time when gatts_sendNUSNotificationIfNotEmpty will get called
 }
 void gatts_sendNUSNotificationIfNotEmpty() {
   if (nusBufferLen)
-    sendNotifBuffer();
+    gatts_sendNUSNotification_txBuffer();
 }
 
 void emitNRFEvent(char *event,JsVar **args,unsigned int argCnt){
@@ -130,10 +148,19 @@ int getIndexFromGatts_if(esp_gatt_if_t gatts_if){
   }
   return -1;
 }
+// Is anything connected?
 bool gatts_if_connected(){
   bool r = false;
   for(int i = 0; i < ble_service_cnt; i++){
     if(gatts_service[i].connected) r = true;
+  }
+  return r;
+}
+// Is any device connected to us? Ignore outgoing connections
+bool gatts_if_periph_connected(){
+  bool r = false;
+  for(int i = 0; i < ble_service_cnt; i++){
+    if(gatts_service[i].isPeripheral && gatts_service[i].connected) r = true;
   }
   return r;
 }
@@ -162,10 +189,12 @@ static void gatts_read_value_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
       }
       if(charValue){
         JSV_GET_AS_CHAR_ARRAY(vPtr,vLen,charValue);
-        for(uint16_t valpos = 0; valpos < vLen; valpos++){
-          rsp.attr_value.value[valpos] = vPtr[valpos];
+        if (vPtr) {
+          for(uint16_t valpos = 0; valpos < vLen; valpos++){
+            rsp.attr_value.value[valpos] = vPtr[valpos];
+          }
+          rsp.attr_value.len = (uint16_t)vLen;
         }
-        rsp.attr_value.len = (uint16_t)vLen;
         jsvUnLock(charValue);
       }
       break;
@@ -185,25 +214,35 @@ static void gatts_read_value_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
 static void gatts_connect_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param) {
   NOT_USED(event);
   int g = getIndexFromGatts_if(gatts_if);
-  esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+  if (bleStatus & (BLE_ENCRYPT_UART | BLE_SECURITY_MITM))
+    esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
   if(g >= 0){
-    JsVar *args[1];
     gatts_service[g].conn_id = param->connect.conn_id;
+    memcpy(gatts_service[g].bda, param->connect.remote_bda, ESP_BD_ADDR_LEN);
     gatts_service[g].connected = true;
+    gatts_service[g].mtu = 23; // default
+    // This is the only way it seems we can tell at this point if we're a peripheral or central.
+    // ..if we were trying to connect to something else and we did, then we're a central.
+    gatts_service[g].isPeripheral = !bleInTask(BLETASK_CONNECT);
+    if (gatts_service[g].isPeripheral) {
+      // If UART enabled, move to it
+      if (!jsiIsConsoleDeviceForced() && (bleStatus & BLE_NUS_INITED)) {
+        jsiClearInputLine(false); // clear the input line on connect
+        jsiSetConsoleDevice(EV_BLUETOOTH, false);
+      }
 
-    ble_gap_addr_t ble_addr;
-    espbtaddr_TO_bleaddr(param->connect.remote_bda, 5/*force an unknown type so '' is reported*/, &ble_addr);
+      ble_gap_addr_t ble_addr;
+      espbtaddr_TO_bleaddr(param->connect.remote_bda, 5/*force an unknown type so '' is reported*/, &ble_addr);
+      JsVar *args[1];
+      args[0] = bleAddrToStr(ble_addr);
+      m_peripheral_conn_handle = 0x01;
+      emitNRFEvent(BLE_CONNECT_EVENT,args,1); // TODO: it might be better to use the BLEP_CONNECTED handler
+      if(gatts_service[g].serviceFlag == BLE_SERVICE_NUS) uart_gatts_connected = true;
 
-    // If UART enabled, move to it
-    if (!jsiIsConsoleDeviceForced() && (bleStatus & BLE_NUS_INITED)) {
-      jsiClearInputLine(false); // clear the input line on connect
-      jsiSetConsoleDevice(EV_BLUETOOTH, false);
+      // request a connection params update to high speed (why not? ESP32 draws a bunch of power anyway)
+      jsble_set_periph_connection_interval(7.5, 7.5);
+      // FIXME: Use DYNAMIC_INTERVAL_ADJUSTMENT from nRF5x port to lower connection interval when idle
     }
-
-    args[0] = bleAddrToStr(ble_addr);
-    m_peripheral_conn_handle = 0x01;
-    emitNRFEvent(BLE_CONNECT_EVENT,args,1); // TODO: it might be better to use the BLEP_CONNECTED handler
-    if(gatts_service[g].serviceFlag == BLE_SERVICE_NUS) uart_gatts_connected = true;
   }
 }
 // Called when something disconnects from us
@@ -212,22 +251,24 @@ static void gatts_disconnect_handler(esp_gatts_cb_event_t event, esp_gatt_if_t g
   int g = getIndexFromGatts_if(gatts_if);
   esp_err_t r;
   if(g >= 0){
-    JsVar *args[1];
     gatts_service[g].connected = false;
-    if(!gatts_if_connected()){
-      r = bluetooth_gap_startAdvertising(true);
+    if (gatts_service[g].isPeripheral) {
+      m_peripheral_conn_handle = BLE_CONN_HANDLE_INVALID;
+      if(!gatts_if_periph_connected()){
+        r = bluetooth_gap_startAdvertising(true);
+      }
+      // if we were on bluetooth and we disconnected, clear the input line so we're fresh next time (#2219)
+      if (jsiGetConsoleDevice()==EV_BLUETOOTH) {
+        jsiClearInputLine(false);
+        if (!jsiIsConsoleDeviceForced())
+          jsiSetConsoleDevice(jsiGetPreferredConsoleDevice(), 0);
+      }
+      // TODO: Maybe use BLEP_DISCONNECTED handler rather than doing this here?
+      JsVar *args[1];
+      args[0] = jsvNewFromInteger(param->disconnect.reason);
+      emitNRFEvent(BLE_DISCONNECT_EVENT,args,1);
+      if(gatts_service[g].serviceFlag == BLE_SERVICE_NUS) uart_gatts_connected = true;
     }
-    // if we were on bluetooth and we disconnected, clear the input line so we're fresh next time (#2219)
-    if (jsiGetConsoleDevice()==EV_BLUETOOTH) {
-      jsiClearInputLine(false);
-      if (!jsiIsConsoleDeviceForced())
-        jsiSetConsoleDevice(jsiGetPreferredConsoleDevice(), 0);
-    }
-    // TODO: Maybe use BLEP_DISCONNECTED handler rather than doing this here?
-    args[0] = jsvNewFromInteger(param->disconnect.reason);
-    m_peripheral_conn_handle = BLE_GATT_HANDLE_INVALID;
-    emitNRFEvent(BLE_DISCONNECT_EVENT,args,1);
-    if(gatts_service[g].serviceFlag == BLE_SERVICE_NUS) uart_gatts_connected = true;
   }
 }
 void gatts_reg_app(){
@@ -240,7 +281,7 @@ void gatts_reg_app(){
     jshSetDeviceInitialised(EV_BLUETOOTH, true);
   }
 }
-void gatts_createService(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param){
+void gatts_createService(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param) {
   NOT_USED(event);
   esp_err_t r;
   gatts_service[param->reg.app_id].service_id.is_primary = true;
@@ -249,6 +290,10 @@ void gatts_createService(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
   bleuuid_TO_espbtuuid(gatts_service[param->reg.app_id].ble_uuid, &gatts_service[param->reg.app_id].service_id.id.uuid);
   r = esp_ble_gatts_create_service(gatts_if, &gatts_service[param->reg.app_id].service_id, gatts_service[param->reg.app_id].num_handles);
   if(r) jsWarn("createService error:%d\n",r);
+  // update out UART service if this was the one
+  if(gatts_service[param->reg.app_id].serviceFlag == BLE_SERVICE_NUS){
+    uart_gatts_service = param->reg.app_id;
+  }
 }
 void gatts_add_char(){
   esp_err_t r;
@@ -290,19 +335,32 @@ void gatts_check_add_descr(esp_bt_uuid_t descr_uuid, uint16_t attr_handle){
 static void gatts_check_add_char(esp_bt_uuid_t char_uuid, uint16_t attr_handle) {
   NOT_USED(char_uuid);
   if (attr_handle != 0) {
-    gatts_char[ble_char_pos].char_handle=attr_handle;
+    gatts_char[ble_char_pos].char_handle = attr_handle;
+    if (gatts_char[ble_char_pos].charFlag == BLE_CHAR_UART_TX)
+      uart_tx_handle = attr_handle;
+    if (gatts_char[ble_char_pos].charFlag == BLE_CHAR_UART_RX)
+      uart_rx_handle = attr_handle;
     gatts_add_descr(); // try to add descriptors to this characteristic
   }
 }
 static void gatts_delete_service(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if){
   NOT_USED(event);
-  esp_err_t r;
-  r = esp_ble_gatts_app_unregister(gatts_service[getIndexFromGatts_if(gatts_if)].gatts_if);
+  int serviceIndex = getIndexFromGatts_if(gatts_if);
+  if (serviceIndex < 0) {
+    jsWarn("delete event for unknown gatts_if:%d", gatts_if);
+    return;
+  }
+  esp_err_t r = esp_ble_gatts_app_unregister(gatts_service[serviceIndex].gatts_if);
   if(r) jsWarn("error in app_unregister:%d\n",r);
 }
 static void gatts_unreg_app(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if){
   NOT_USED(event);
-  gatts_service[getIndexFromGatts_if(gatts_if)].gatts_if = ESP_GATT_IF_NONE;
+  int serviceIndex = getIndexFromGatts_if(gatts_if);
+  if (serviceIndex < 0) {
+    jsWarn("unregister event for unknown gatts_if:%d", gatts_if);
+    return;
+  }
+  gatts_service[serviceIndex].gatts_if = ESP_GATT_IF_NONE;
   for(int i = 0; i < ble_service_cnt; i++){
     if(gatts_service[i].gatts_if != ESP_GATT_IF_NONE) return;
   }
@@ -314,6 +372,8 @@ static void gatts_unreg_app(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if){
   ble_char_cnt = 0;
   ble_descr_cnt = 0;
   if(_removeValues) bleRemoveChilds(execInfo.hiddenRoot);
+  gatts_reset_in_progress = false;
+  if (gatts_reset_complete) xSemaphoreGive(gatts_reset_complete);
 }
 
 // Update our hidden var with the right value
@@ -330,7 +390,10 @@ void gatts_set_char_value(uint16_t handle, char *data, int len) {
 void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param) {
   jsWarnGattsEvent(event,gatts_if);
   switch (event) {
-  case ESP_GATTS_REG_EVT:{gatts_createService(event,gatts_if,param);break;}
+  case ESP_GATTS_REG_EVT:{
+    gatts_createService(event,gatts_if,param);
+    break;
+  }
   case ESP_GATTS_CREATE_EVT:{
     gatts_service[ble_service_pos].service_handle = param->create.service_handle;
     esp_ble_gatts_start_service(gatts_service[ble_service_pos].service_handle);
@@ -339,8 +402,7 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
   case ESP_GATTS_ADD_CHAR_EVT: {
     if (param->add_char.status==ESP_GATT_OK) {
       gatts_check_add_char(param->add_char.char_uuid,param->add_char.attr_handle);
-    }
-    else{
+    } else {
       jsWarn("add char failed:%d\n",param->add_char.status);
       gatts_char[ble_char_pos].char_handle = (uint16_t)-1;
       ble_char_pos++;
@@ -360,9 +422,11 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
   case ESP_GATTS_CONNECT_EVT: {gatts_connect_handler(event,gatts_if,param); break;}
   case ESP_GATTS_READ_EVT: {gatts_read_value_handler(event, gatts_if, param);break;}
   case ESP_GATTS_WRITE_EVT:{
-    if(gatts_service[getIndexFromGatts_if(gatts_if)].serviceFlag == BLE_SERVICE_NUS){ // UART service
-      jshPushIOCharEvents(EV_BLUETOOTH, (char*)param->write.value, param->write.len);
-      jshHadEvent();
+    if(gatts_service[getIndexFromGatts_if(gatts_if)].serviceFlag == BLE_SERVICE_NUS) { // UART service
+      if (param->write.handle == uart_rx_handle) { // we could have been writing to the TX CCCD to enable notifications
+        jshPushIOCharEvents(EV_BLUETOOTH, (char*)param->write.value, param->write.len);
+        jshHadEvent();
+      }
     } else { // a normal write
       // Update our hidden var with the right value (this is not great to do from an IRQ)
       gatts_set_char_value(param->write.handle, (char*)param->write.value, param->write.len);
@@ -390,11 +454,26 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
   case ESP_GATTS_UNREG_EVT:{gatts_unreg_app(event,gatts_if);break;}
 
   case ESP_GATTS_EXEC_WRITE_EVT:break;
-  case ESP_GATTS_MTU_EVT:break;
-  case ESP_GATTS_CONF_EVT: // if (gatts_if==uart_gatts_if) UART indicate TX has finished
+  case ESP_GATTS_MTU_EVT: {
+    int g = getIndexFromGatts_if(gatts_if);
+    uint16_t effective_mtu = param->mtu.mtu;
+    if (g>=0) gatts_service[g].mtu = effective_mtu;
+    //jsble_queue_pending_buf(BLEP_MTU_UPDATE, g, (char*)effective_mtu, sizeof(effective_mtu)); // need to move BLEP_MTU_UPDATE from nRF52 into global
+  } break;
+  case ESP_GATTS_CONF_EVT: // if (gatts_if==gatts_service[uart_gatts_service].gatts_if) UART indicate TX has finished
     break;
   case ESP_GATTS_ADD_INCL_SRVC_EVT:break;
-  case ESP_GATTS_STOP_EVT:break;
+  case ESP_GATTS_STOP_EVT: // service stopped via gatts_reset - we need to remove it now
+    if (param->stop.status == ESP_GATT_OK) {
+      // Safe to delete now that it's no longer active
+      esp_ble_gatts_delete_service(param->stop.service_handle);
+    } else {
+      jsWarn("ESP_GATTS_STOP_EVT: Stop service failed, status %d", param->stop.status);
+      // Ensure a failed stop cannot leave a pending service replacement stuck.
+      esp_err_t r = esp_ble_gatts_app_unregister(gatts_if);
+      if (r) jsWarn("error in app_unregister after stop failure:%d", r);
+    }
+    break;
   case ESP_GATTS_OPEN_EVT:break;
   case ESP_GATTS_CANCEL_OPEN_EVT:break;
   case ESP_GATTS_CLOSE_EVT:break;
@@ -407,26 +486,31 @@ void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp
 
 void add_ble_uart(){
   int handles = 1;
+  esp_gatt_perm_t read_perm = ESP_GATT_PERM_READ,
+                  write_perm = ESP_GATT_PERM_WRITE;
+  if (bleStatus & BLE_ENCRYPT_UART) {
+    read_perm = ESP_GATT_PERM_READ_ENCRYPTED;// or ENC_MITM to require MITM protection?
+    write_perm = ESP_GATT_PERM_WRITE_ENCRYPTED;// or ENC_MITM to require MITM protection?
+  }
   ble_service_pos++;
   gatts_service[ble_service_pos].ble_uuid = uart_service_uuid;
   bleuuid_To_uuid128(gatts_service[ble_service_pos].ble_uuid,&adv_service_uuid128[ble_service_pos * 16]);
   gatts_service[ble_service_pos].uuid16 = gatts_service[ble_service_pos].ble_uuid.uuid;
   gatts_service[ble_service_pos].serviceFlag = BLE_SERVICE_NUS;
+  gatts_service[ble_service_pos].gatts_if = ESP_GATT_IF_NONE;
   ble_char_pos++;
-  gatts_char[ble_char_pos].char_perm = 0;
   gatts_char[ble_char_pos].service_pos = ble_service_pos;
   gatts_char[ble_char_pos].char_uuid = uart_char_rx_uuid;
-  gatts_char[ble_char_pos].char_perm |= ESP_GATT_PERM_WRITE;
+  gatts_char[ble_char_pos].char_perm = write_perm;
   gatts_char[ble_char_pos].char_property |= ESP_GATT_CHAR_PROP_BIT_WRITE|ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
   gatts_char[ble_char_pos].char_control = NULL;
   gatts_char[ble_char_pos].char_handle = 0;
   gatts_char[ble_char_pos].charFlag = BLE_CHAR_UART_RX;
   handles +=2;
   ble_char_pos++;
-  gatts_char[ble_char_pos].char_perm = 0;
   gatts_char[ble_char_pos].service_pos = ble_service_pos;
   gatts_char[ble_char_pos].char_uuid = uart_char_tx_uuid;
-  gatts_char[ble_char_pos].char_perm |= ESP_GATT_PERM_READ;
+  gatts_char[ble_char_pos].char_perm = read_perm;
   gatts_char[ble_char_pos].char_property |= ESP_GATT_CHAR_PROP_BIT_NOTIFY;
   gatts_char[ble_char_pos].char_control = NULL;
   gatts_char[ble_char_pos].char_handle = 0;
@@ -436,24 +520,10 @@ void add_ble_uart(){
   gatts_descr[ble_descr_pos].char_pos = ble_char_pos;
   gatts_descr[ble_descr_pos].descr_uuid = descriptor_uuid;
   gatts_descr[ble_descr_pos].descr_handle = 0;
-  gatts_descr[ble_descr_pos].descr_perm = ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE;
+  gatts_descr[ble_descr_pos].descr_perm = read_perm | write_perm;
   gatts_descr[ble_descr_pos].len = 2;
   handles +=2;
-  gatts_service[ble_service_pos].gatts_if = ESP_GATT_IF_NONE;
   gatts_service[ble_service_pos].num_handles = (uint16_t)handles;
-}
-void setBleUart(){
-  uart_gatts_if = ESP_GATT_IF_NONE;
-  for(int i = 0; i < ble_service_cnt; i++){
-    if(gatts_service[i].serviceFlag == BLE_SERVICE_NUS){
-      uart_gatts_if = gatts_service[i].gatts_if;
-      for(int j = 0; j < ble_char_cnt; j++){
-        if(gatts_char[j].charFlag == BLE_CHAR_UART_TX){
-          uart_tx_handle = gatts_char[j].char_handle;
-        }
-      }
-    }
-  }
 }
 
 void gatts_char_init(JsvObjectIterator *ble_char_it){
@@ -624,9 +694,14 @@ void gatts_create_structs(bool enableUART){
 
 void gatts_set_services(JsVar *data){
   JsVar *options = jsvObjectGetChildIfExists(execInfo.hiddenRoot, BLE_NAME_SERVICE_OPTIONS);
-  gatts_reset(true);
+  if (ble_service_cnt > 0 && !gatts_reset(true)) {
+    jsvUnLock(options);
+    return;
+  }
   jsvUnLock(gatts_services);
-  gatts_services = data;
+  gatts_services = data ? jsvLockAgain(data) : NULL;
+  uart_gatts_service = -1;
+  uart_tx_handle = 0;
 
   JsVar *uartVar = jsvObjectGetChildIfExists(execInfo.hiddenRoot, BLE_NAME_NUS);
   bool enableUART = !uartVar || jsvGetBool(uartVar); // if not set, default is enabled
@@ -643,28 +718,62 @@ void gatts_set_services(JsVar *data){
   ble_char_pos = 0;
   ble_descr_pos = 0;
   gatts_reg_app();  //this starts tons of api calls creating gatts-events. Ends in gatts_reg_app
-  if (enableUART)
-    setBleUart();
   jsvUnLock(options);
 }
-void gatts_reset(bool removeValues){
+bool gatts_reset(bool removeValues){
   if (!removeValues && gatts_if_connected()) {
     jsWarn("Not removing services for reset() as connected");
-    return;
+    return true;
+  }
+  if (gatts_reset_in_progress) {
+    _removeValues |= removeValues;
+    if (gatts_reset_complete &&
+        xSemaphoreTake(gatts_reset_complete, pdMS_TO_TICKS(GATTS_RESET_TIMEOUT_MS)) == pdTRUE)
+      return true;
+    jsWarn("Timed out waiting for GATT services to reset");
+    return false;
   }
   esp_err_t r;
   _removeValues = removeValues;
-  if(ble_service_cnt > 0){
+  if (ble_service_cnt > 0) { // FIXME: why are we removing even if removeValues=false?
+    int activeServices = 0;
+    for (int i = 0; i < ble_service_cnt; i++) {
+      if (gatts_service[i].gatts_if != ESP_GATT_IF_NONE) activeServices++;
+    }
+    if (!activeServices) return true;
+    if (!gatts_reset_complete)
+      gatts_reset_complete = xSemaphoreCreateBinary();
+    if (!gatts_reset_complete) {
+      jsWarn("Unable to allocate GATT reset semaphore");
+      return false;
+    }
+    // Discard a completion left by an earlier reset before starting this one.
+    while (xSemaphoreTake(gatts_reset_complete, 0) == pdTRUE) {}
+    gatts_reset_in_progress = true;
     for(int i = 0; i < ble_service_cnt;i++){
       if(gatts_service[i].gatts_if != ESP_GATT_IF_NONE){
-        r = esp_ble_gatts_delete_service(gatts_service[i].service_handle);
-        if(r) jsWarn("delete service error:%d\n",r);
+        r = esp_ble_gatts_stop_service(gatts_service[i].service_handle);
+        if (r) {
+          jsWarn("stop service error:%d\n",r);
+          r = esp_ble_gatts_app_unregister(gatts_service[i].gatts_if);
+          if (r) jsWarn("app_unregister after stop error:%d\n", r);
+        }
+        // ESP_GATTS_STOP_EVT should now be fired, and we do esp_ble_gatts_delete_service in there
       }
     }
+    if (xSemaphoreTake(gatts_reset_complete, pdMS_TO_TICKS(GATTS_RESET_TIMEOUT_MS)) != pdTRUE) {
+      jsWarn("Timed out waiting for GATT services to reset");
+      return false;
+    }
   }
+  return true;
 }
 // called from NRF.updateServices
 void gatts_update_service(uint16_t char_handle, char *data, int len, bool isNotify, bool isIndicate){
+  if (gatts_reset_in_progress) {
+    jsWarn("Cannot update GATT services while reset is in progress");
+    return;
+  }
   gatts_set_char_value(char_handle, data, len);
   if (isNotify || isIndicate) {
     for(uint16_t pos = 0; pos < ble_char_cnt; pos++){
@@ -676,6 +785,26 @@ void gatts_update_service(uint16_t char_handle, char *data, int len, bool isNoti
           len,data,isIndicate /* false = notify */);
         if (err) jsiConsolePrintf("NRF.updateServices esp_ble_gatts_send_indicate failed with %d\n", err);
       }
+    }
+  }
+}
+
+/** Set the connection interval of the peripheral connection. Returns an error code. */
+uint32_t jsble_set_periph_connection_interval(JsVarFloat min, JsVarFloat max) {
+  esp_ble_conn_update_params_t conn_params = {0};
+
+  // Define your desired timing bounds (Multiples of 1.25ms)
+  conn_params.min_int = (int)(0.5 + (min/1.25));  // 1.25ms units
+  conn_params.max_int = (int)(0.5 + (max/1.25));  // 1.25ms units
+
+  conn_params.latency = 0;   // Number of connection events the peripheral can skip
+  conn_params.timeout = 400; // 400 * 10ms = 4000ms (Link loss timeout)
+
+  // Send the update request to the Central
+  for(int i = 0; i < ble_service_cnt;i++) {
+    if(gatts_service[i].connected) {
+      memcpy(conn_params.bda, gatts_service[i].bda, ESP_BD_ADDR_LEN);
+      esp_ble_gap_update_conn_params(&conn_params);
     }
   }
 }

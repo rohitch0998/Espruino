@@ -1,4 +1,10 @@
 [
   {"class":"OneWire","name":"*"},
-  {"class":"SPI","name":"send4bit"}
+  {"class":"SPI","name":"send4bit"},
+  {"class":"E","name":"enableWatchdog"},
+  {"class":"E","name":"getClock"},
+  {"class":"E","name":"setBootCode"},
+  {"class":"E","name":"dumpStr"},
+  {"class":"E","name":"dumpFragmentation"},
+  {"class":"timer","name":"*"}
 ]

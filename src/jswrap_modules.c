@@ -133,7 +133,7 @@ JsVar *jswrap_require(JsVar *moduleName) {
         jsvUnLock2(fileContents, exception);
         fileContents = 0;
       }
-      if (fileContents && jsvGetStringLength(fileContents)>0)
+      if (fileContents && !jsvIsEmptyString(fileContents))
         moduleExport = jspEvaluateModule(fileContents);
       jsvUnLock(fileContents);
     }
@@ -191,35 +191,6 @@ JsVar *jswrap_modules_getCached() {
   jsvObjectIteratorFree(&it);
   jsvUnLock(moduleList);
   return arr;
-}
-
-/*JSON{
-  "type" : "staticmethod",
-  "class" : "Modules",
-  "name" : "removeCached",
-  "generate" : "jswrap_modules_removeCached",
-  "params" : [
-    ["id","JsVar","The module name to remove"]
-  ]
-}
-Remove the given module from the list of cached modules
- */
-void jswrap_modules_removeCached(JsVar *id) {
-  if (!jsvIsString(id)) {
-    jsExceptionHere(JSET_ERROR, "First argument must be String");
-    return;
-  }
-  JsVar *moduleList = jswrap_modules_getModuleList();
-  if (!moduleList) return; // out of memory
-
-  JsVar *moduleExportName = jsvFindChildFromVar(moduleList, id, false);
-  if (!moduleExportName) {
-    jsExceptionHere(JSET_ERROR, "Module %q not found", id);
-  } else {
-    jsvRemoveChildAndUnLock(moduleList, moduleExportName);
-  }
-
-  jsvUnLock(moduleList);
 }
 
 /*JSON{

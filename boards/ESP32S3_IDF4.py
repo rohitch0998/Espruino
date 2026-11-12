@@ -19,7 +19,7 @@
 
 # A Note about the 'variables' parameter on ESP32 Builds
 # ------------------------------------------------------
-# 
+#
 # For the ESP32 build, the number of JsVars is governed by two factors:
 #     * Available memory
 #     * Maximum number of JsVars for the used JsVar format
@@ -45,15 +45,14 @@
 # available memory. Using too small a JsVar format will under utilise
 # available memory.
 
-
 import pinutils;
 info = {
  'name'                     : "ESP32S3",
  'espruino_page_link'       : 'ESP32',
- 'default_console'          : "EV_SERIAL1",
+ 'default_console'          : "EV_SERIAL1", # USB + Serial1 - see ESPR_USE_USB_SERIAL_JTAG
  'default_console_baudrate' : "115200",
- 'variables'                : 16383, # See note above 
- 'io_buffer_size'           : 1024, # How big is the input buffer (in 4 byte words). Default is 256, but this makes us less likely to drop data
+ 'variables'                : 16383, # See note above
+ 'io_buffer_size'           : 4096, # How big is the input buffer (in bytes). Default on nRF52 is 1024
  'binary_name'              : 'espruino_%v_esp32s3.bin',
  'build' : {
    'optimizeflags' : '-Og',
@@ -66,15 +65,14 @@ info = {
      'TELNET',
      'NEOPIXEL',
      'FILESYSTEM',
-#     'FLASHFS',
-     'BLUETOOTH'	 
+     'BLUETOOTH'
    ],
    'makefile' : [
      'DEFINES+=-DESP_PLATFORM -DESP32=1',
      'DEFINES+=-DESP_STACK_SIZE=25000',
      'DEFINES+=-DJSVAR_MALLOC', # Allocate space for variables at jsvInit time
      'DEFINES+=-DUSE_FONT_6X8',
-     'DEFINES+=-DUSB_CDC',      # Comment out to disable USB_CDC if board has uart interface      
+     'DEFINES+=-DESPR_USE_USB_SERIAL_JTAG -DUSB', # Use on-chip USB. See ESPR_USE_USB_SERIAL_JTAG in README_BuildProcess.md
      'ESP32_FLASH_MAX=1572864'
    ]
  }
@@ -95,7 +93,7 @@ chip = {
   'saved_code' : {
     'address' : 0x320000,
     'page_size' : 4096,
-    'pages' : 64,
+    'pages' : 224, # 896kb - see partitions_espruino.csv
     'flash_available' : 1344, # firmware can be up to this size - see partitions_espruino.csv
   },
 };
@@ -146,17 +144,18 @@ board_esp32["_css"] = """
 boards = [ board_esp32 ];
 
 def get_pins():
-  # Todo review as ESP32-S3 has there are 45 Physical GPIO pins Numbered 0->21 and 26->48
+  # ESP32-S3 has 45 Physical GPIO pins Numbered 0->21 and 26->48
   # see https://www.espressif.com/sites/default/files/documentation/esp32-s3_technical_reference_manual_en.pdf
-  pins = pinutils.generate_pins(0,39)  # 40 General Purpose I/O Pins.
-  
-  # I2C added for issue #2589 - all decided by user (not defined in specs)
-  pinutils.findpin(pins, "PD8", True)["functions"]["I2C1_SDA"]=0; 
-  pinutils.findpin(pins, "PD9", True)["functions"]["I2C1_SCL"]=0; 
-  pinutils.findpin(pins, "PD18", True)["functions"]["I2C2_SDA"]=0; 
-  pinutils.findpin(pins, "PD19", True)["functions"]["I2C2_SCL"]=0; 
+  pins = pinutils.generate_pins(0,48)
+  # TODO: we could delete 22..25 as ESP32-S3 doesn't seem to have those
 
-  # SPI added for issue #2601 
+  # I2C added for issue #2589 - all decided by user (not defined in specs)
+  pinutils.findpin(pins, "PD8", True)["functions"]["I2C1_SDA"]=0;
+  pinutils.findpin(pins, "PD9", True)["functions"]["I2C1_SCL"]=0;
+  pinutils.findpin(pins, "PD18", True)["functions"]["I2C2_SDA"]=0;
+  pinutils.findpin(pins, "PD19", True)["functions"]["I2C2_SCL"]=0;
+
+  # SPI added for issue #2601
   #  - for SPI1 use pins that will bypass GPIO matrix (So Quicker) see esp-idf-4 /components/soc/esp32s3/include/soc/spi_pins.h
   pinutils.findpin(pins, "PD12", True)["functions"]["SPI1_SCK"]=0;
   pinutils.findpin(pins, "PD13", True)["functions"]["SPI1_MISO"]=0;
@@ -165,6 +164,11 @@ def get_pins():
   pinutils.findpin(pins, "PD4", True)["functions"]["SPI2_SCK"]=0;
   pinutils.findpin(pins, "PD6", True)["functions"]["SPI2_MISO"]=0;
   pinutils.findpin(pins, "PD7", True)["functions"]["SPI2_MOSI"]=0;
+
+  pinutils.findpin(pins, "PD43", True)["functions"]["USART1_TX"]=0;
+  pinutils.findpin(pins, "PD44", True)["functions"]["USART1_RX"]=0;
+  pinutils.findpin(pins, "PD17", True)["functions"]["USART2_TX"]=0;
+  pinutils.findpin(pins, "PD18", True)["functions"]["USART2_RX"]=0;
 
   # everything is non-5v tolerant
   #for pin in pins:

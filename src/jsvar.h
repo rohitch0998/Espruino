@@ -95,7 +95,7 @@ typedef enum {
 
     JSV_VARTYPEMASK = NEXT_POWER_2(_JSV_VAR_END)-1, // probably this is 63
 
-    JSV_CONSTANT    = JSV_VARTYPEMASK+1, ///< to specify if this variable is a constant or not. Only used for NAMEs
+    JSV_CONSTANT    = JSV_VARTYPEMASK+1, ///< to specify if this variable is a constant or not. Used for NAMEs, but also NativeStrings in Flash and ArrayBuffers that reference those
     JSV_NATIVE      = JSV_CONSTANT<<1, ///< to specify if this is a function parameter
     JSV_GARBAGE_COLLECT = JSV_NATIVE<<1, ///< When garbage collecting, this flag is true IF we should GC!
     JSV_IS_RECURSING = JSV_GARBAGE_COLLECT<<1, ///< used to stop recursive loops in jsvTrace
@@ -221,13 +221,13 @@ typedef union {
 
 
 
-typedef struct JsVarStruct {
+struct JsVarStruct {
   /** The actual variable data, as well as references (see below). Put first so word aligned */
   JsVarData varData;
 
   /** the flags determine the type of the variable - int/double/string/etc. */
   volatile JsVarFlags flags;
-} PACKED_FLAGS JsVar;
+} PACKED_FLAGS;
 
 /* We have a few different types:
  *
@@ -302,7 +302,7 @@ bool jsvMoreFreeVariablesThan(unsigned int vars); ///< Return whether there are 
 void jsvShowAllocated(); ///< Show what is still allocated, for debugging memory problems
 /// Try and allocate more memory - only works if RESIZABLE_JSVARS is defined
 void jsvSetMemoryTotal(unsigned int jsNewVarCount);
-/// Scan memory to find any JsVar that references a specific memory range, and if so update what it points to to p[oint to the new address
+/// Scan memory to find any JsVar that references a specific memory range, and if so update what it points to to point to the new address. If newAddr==0 we just convert in to 'null'
 void jsvUpdateMemoryAddress(size_t oldAddr, size_t length, size_t newAddr);
 
 
@@ -492,6 +492,7 @@ bool jsvIsEqual(JsVar *a, JsVar *b);
 const char *jsvGetConstString(const JsVar *v); ///< Get a const string representing this variable - if we can. Otherwise return 0
 const char *jsvGetTypeOf(const JsVar *v); ///< Return the 'type' of the JS variable (eg. JS's typeof operator)
 JsVar *jsvGetValueOf(JsVar *v); ///< Return the JsVar, or if it's an object and has a valueOf function, call that
+JsVar *jsvGetValueOfAndUnLock(JsVar *v); ///< Return the JsVar, or if it's an object and has a valueOf function, call that
 
 /** Save this var as a string to the given buffer with a null terminator, and return how long it was (excluding terminating 0)
 If the buffer length is exceeded, string it cropped and terminating 0 is still added */
@@ -509,7 +510,11 @@ JsVar *jsvGetFlatStringFromPointer(char *v); ///< Given a pointer to the first e
 char *jsvGetDataPointer(JsVar *v, size_t *len); ///< If the variable points to a *flat* area of memory, return a pointer (and set length). Otherwise return 0.
 size_t jsvGetLinesInString(JsVar *v); ///<  IN A STRING get the number of lines in the string (min=1)
 size_t jsvGetCharsOnLine(JsVar *v, size_t line); ///<  IN A STRING Get the number of characters on a line - lines start at 1
-void jsvGetLineAndCol(JsVar *v, size_t charIdx, size_t *line, size_t *col); ///< IN A STRING, get the 1-based line and column of the given character. Both values must be non-null
+
+/** IN A STRING, get the 1-based line and column of the given character. Both line+col must be non-null.
+If ignoredLines is set, this is the number of lines at the beginning we should ignore because the
+IDE might have added them automatically. */
+void jsvGetLineAndCol(JsVar *v, size_t charIdx, size_t *line, size_t *col, size_t *ignoredLines);
 size_t jsvGetIndexFromLineAndCol(JsVar *v, size_t line, size_t col); ///<  IN A STRING, get a character index from a line and column
 
 
@@ -523,8 +528,13 @@ bool jsvIsStringEqualOrStartsWithOffset(JsVar *var, const char *str, bool isStar
 */
 bool jsvIsStringEqualOrStartsWith(JsVar *var, const char *str, bool isStartsWith);
 bool jsvIsStringEqual(JsVar *var, const char *str); ///< is string equal. see jsvIsStringEqualOrStartsWith
+bool jsvIsStringIEqual(JsVar *var, const char *str); ///< is string equal (ignoring case). see jsvIsStringEqualOrStartsWithOffset
 bool jsvIsStringIEqualAndUnLock(JsVar *var, const char *str); ///< is string equal (ignoring case). see jsvIsStringEqualOrStartsWithOffset
-int jsvCompareString(JsVar *va, JsVar *vb, size_t starta, size_t startb, bool equalAtEndOfString); ///< Compare 2 strings, starting from the given character positions
+/** Compare 2 strings, starting from the given character positions. equalAtEndOfString means that
+ * if one of the strings ends (even if the other hasn't), we treat them as equal.
+ * For a basic strcmp, do: jsvCompareString(a,b,0,0,false,false)
+ *  */
+int jsvCompareString(JsVar *va, JsVar *vb, size_t starta, size_t startb, bool equalAtEndOfA, bool equalAtEndOfB);
 /// Return a new string containing just the characters that are shared between two strings.
 JsVar *jsvGetCommonCharacters(JsVar *va, JsVar *vb);
 int jsvCompareInteger(JsVar *va, JsVar *vb); ///< Compare 2 integers, >0 if va>vb,  <0 if va<vb. If compared with a non-integer, that gets put later
@@ -707,10 +717,17 @@ JsVar *jsvObjectGetChildI(JsVar *obj, const char *name);
 bool jsvObjectGetBoolChild(JsVar *obj, const char *name);
 /// Same as jsvGetIntegerAndUnLock(jsvObjectGetChildIfExists(obj, name))
 JsVarInt jsvObjectGetIntegerChild(JsVar *obj, const char *name);
+/// Same as jsvGetIntegerAndUnLock(jsvObjectGetChildIfExists(obj, name)) but with a default value if the child doesn't exist
+JsVarInt jsvObjectGetIntegerChildOr(JsVar *obj, const char *name, JsVarInt defaultValue);
 /// Same as jsvGetFloatAndUnLock(jsvObjectGetChildIfExists(obj, name))
 JsVarFloat jsvObjectGetFloatChild(JsVar *obj, const char *name);
 /// Set the named child of an object, and return the child (so you can choose to unlock it if you want)
 JsVar *jsvObjectSetChild(JsVar *obj, const char *name, JsVar *child);
+void jsvObjectSetIntChild(JsVar *obj, const char *name, JsVarInt value);
+void jsvObjectSetFloatChild(JsVar *obj, const char *name, JsVarFloat value);
+void jsvObjectSetBoolChild(JsVar *obj, const char *name, bool value);
+void jsvObjectSetStringChild(JsVar *obj, const char *name, const char *value);
+void jsvObjectSetPinChild(JsVar *obj, const char *name, int value);
 /// Set the named child of an object, and return the child (so you can choose to unlock it if you want)
 JsVar *jsvObjectSetChildVar(JsVar *obj, JsVar *name, JsVar *child);
 /// Set the named child of an object, and unlock the child
@@ -735,6 +752,7 @@ JsVar *jsvGetArrayIndex(const JsVar *arr, JsVarInt index); ///< Get a 'name' at 
 JsVar *jsvGetArrayItem(const JsVar *arr, JsVarInt index); ///< Get an item at the specified index in the array if it exists (and lock it)
 JsVar *jsvGetLastArrayItem(const JsVar *arr); ///< Returns the last item in the given array (with string OR numeric index)
 void jsvSetArrayItem(JsVar *arr, JsVarInt index, JsVar *item); ///< Set an array item at the specified index in the array
+void jsvRemoveArrayItem(JsVar *arr, JsVarInt index); ///< Remove an item from the array (does not change the array length)
 void jsvGetArrayItems(JsVar *arr, unsigned int itemCount, JsVar **itemPtr); ///< Get all elements from arr and put them in itemPtr (unless it'd overflow). Makes sure all of itemPtr either contains a JsVar or 0
 JsVar *jsvGetIndexOfFull(JsVar *arr, JsVar *value, bool matchExact, bool matchIntegerIndices, int startIdx); ///< Get the index of the value in the array (matchExact==use pointer not equality check, matchIntegerIndices = don't check non-integers)
 JsVar *jsvGetIndexOf(JsVar *arr, JsVar *value, bool matchExact); ///< Get the index of the value in the array or object (matchExact==use pointer, not equality check)
@@ -835,15 +853,29 @@ void jsvFree(void *ptr);
 #define JSV_GET_AS_CHAR_ARRAY(TARGET_PTR, TARGET_LENGTH, DATA)                \
   size_t TARGET_LENGTH = 0;                                                   \
   char *TARGET_PTR = jsvGetDataPointer(DATA, &TARGET_LENGTH);                 \
-  if (DATA && !TARGET_PTR) {                                                          \
+  if (DATA && !TARGET_PTR) {                                                  \
    TARGET_LENGTH = (size_t)jsvIterateCallbackCount(DATA);                     \
     if (TARGET_LENGTH+256 > jsuGetFreeStack()) {                              \
-      jsExceptionHere(JSET_ERROR, "Not enough stack memory for data");  \
+      TARGET_LENGTH = 0;                                                      \
+      jsExceptionHere(JSET_ERROR, "Not enough stack memory for data");        \
     } else {                                                                  \
       TARGET_PTR = (char *)alloca(TARGET_LENGTH);                             \
       jsvIterateCallbackToBytes(DATA, (unsigned char *)TARGET_PTR,            \
                                       (unsigned int)TARGET_LENGTH);           \
     }                                                                         \
+  }
+
+// Like JSV_GET_AS_CHAR_ARRAY but does not throw an exception if it can't do it (just sets TARGET_PTR=TARGET_LENGTH=0);
+#define JSV_GET_AS_CHAR_ARRAY_NO_ERROR(TARGET_PTR, TARGET_LENGTH, DATA)       \
+  size_t TARGET_LENGTH = 0;                                                   \
+  char *TARGET_PTR = jsvGetDataPointer(DATA, &TARGET_LENGTH);                 \
+  if (DATA && !TARGET_PTR) {                                                  \
+   TARGET_LENGTH = (size_t)jsvIterateCallbackCount(DATA);                     \
+    if (TARGET_LENGTH+256 <= jsuGetFreeStack()) {                             \
+      TARGET_PTR = (char *)alloca(TARGET_LENGTH);                             \
+      jsvIterateCallbackToBytes(DATA, (unsigned char *)TARGET_PTR,            \
+                                      (unsigned int)TARGET_LENGTH);           \
+    } else TARGET_LENGTH = 0;                                                 \
   }
 
 #if defined(JSVAR_MALLOC)

@@ -172,9 +172,13 @@ void jswrap_io_poke(JsVarInt addr, JsVar *data, int wordSize) {
   "params" : [
     ["pin","pin",["The pin to use","You can find out which pins to use by looking at [your board's reference page](#boards) and searching for pins with the `ADC` markers."]]
   ],
-  "return" : ["float","The Analog Value of the Pin between 0(GND) and 1(VCC). See below."]
+  "return" : ["float","The analog value of the `Pin` between 0(GND) and 1(VCC). See below."]
 }
 Get the analogue value of the given pin.
+
+* The value is normally greater than or equal to 0, however in some cases nRF52-based boards can produce values
+less than 0 when the ADC voltage is slightly less than the chip's internal GND.
+* The value returned will always be *less* than 1, even when the ADC reads full range. For example a 12 bit ADC may return 4095 as a full-range value, but this is divided by 4096 to produce `analogRead`'s output value.
 
 This is different to Arduino which only returns an integer between 0 and 1023
 
@@ -265,19 +269,20 @@ void jswrap_io_digitalPulse(Pin pin, bool value, JsVar *times) {
   uint32_t timerOffset = jstGetUtilTimerOffset();
   bool hasTimer = jstGetLastPinTimerTask(pin, &task);
   if (!hasTimer) task.time = 0;
+  // set first edge
+  if (!hasTimer)
+    jshPinOutput(pin, value);
   // now start either one or a series of pulses
   if (jsvIsNumeric(times)) {
     JsVarFloat pulseTime = jsvGetFloat(times);
     if (pulseTime<0 || isnan(pulseTime)) {
       jsExceptionHere(JSET_ERROR, "Pulse Time is less than 0 or not a number");
     } else if (pulseTime>0) {
-      if (!hasTimer) jshPinOutput(pin, value);
       task.time += jshGetTimeFromMilliseconds(pulseTime);
       jstPinOutputAtTime(task.time, &timerOffset, &pin, 1, !value);
     } else jstUtilTimerWaitEmpty(); // time==0
   } else if (jsvIsIterable(times)) {
     // iterable, so output a square wave
-    if (!hasTimer) jshPinOutput(pin, value);
     JsvIterator it;
     jsvIteratorNew(&it, times, JSIF_EVERY_ARRAY_ELEMENT);
     while (jsvIteratorHasElement(&it)) {
@@ -302,7 +307,7 @@ void jswrap_io_digitalPulse(Pin pin, bool value, JsVar *times) {
   "name"     : "digitalWrite",
   "generate" : "jswrap_io_digitalWrite",
   "params"   : [
-    ["pin",   "JsVar","The pin to use"],
+    ["pin",   "JsVar","The pin to use (or an array of pins)"],
     ["value", "JsVar","Whether to write a high (true) or low (false) value"]
   ],
   "typescript" : "declare function digitalWrite(pin: Pin, value: boolean): void;"
@@ -319,7 +324,7 @@ reset pin's state to `"output"`
 
 If pin argument is an array of pins (e.g. `[A2,A1,A0]`) the value argument will
 be treated as an array of bits where the last array element is the least
-significant bit.
+significant bit. An array may contain 'undefined' for a pin to ignore that bit.
 
 In this case, pin values are set least significant bit first (from the
 right-hand side of the array of pins). This means you can use the same pin
@@ -346,9 +351,8 @@ void jswrap_io_digitalWrite(
     JsVarRef pinName = jsvGetLastChild(pinVar); // NOTE: start at end and work back!
     while (pinName) {
       JsVar *pinNamePtr = jsvLock(pinName);
-      JsVar *pinPtr = jsvSkipName(pinNamePtr);
-      jshPinOutput(jshGetPinFromVar(pinPtr), value&1);
-      jsvUnLock(pinPtr);
+      Pin p = jshGetPinFromVarAndUnLock(jsvSkipName(pinNamePtr));
+      if (p!=PIN_UNDEFINED) jshPinOutput(p, value&1);
       pinName = jsvGetPrevSibling(pinNamePtr);
       jsvUnLock(pinNamePtr);
       value = value>>1; // next bit down
@@ -527,9 +531,9 @@ JsVar *jswrap_io_getPinMode(Pin pin) {
 typedef struct {
   Pin pins[jswrap_io_shiftOutDataMax];
   Pin clk;
-#ifdef STM32
-  volatile uint32_t *addrs[jswrap_io_shiftOutDataMax];
-  volatile uint32_t *clkAddr;
+#ifndef SAVE_ON_FLASH
+  JshGetPinAddressResult pinAddrs[jswrap_io_shiftOutDataMax];
+  JshGetPinAddressResult clkAddr;
 #endif
   bool clkPol; // clock polarity
 
@@ -542,35 +546,41 @@ void jswrap_io_shiftOutCallback(int val, void *data) {
   int n, i;
   for (i=0;i<d->repeat;i++) {
     for (n=d->cnt-1; n>=0; n--) {
-  #ifdef STM32
-      if (d->addrs[n])
-        *d->addrs[n] = val&1;
-  #else
       if (jshIsPinValid(d->pins[n]))
           jshPinSetValue(d->pins[n], val&1);
-  #endif
       val>>=1;
     }
-#ifdef STM32
-    if (d->clkAddr) {
-        *d->clkAddr = d->clkPol;
-        *d->clkAddr = !d->clkPol;
-    }
-#else
     if (jshIsPinValid(d->clk)) {
       jshPinSetValue(d->clk, d->clkPol);
       jshPinSetValue(d->clk, !d->clkPol);
     }
-#endif
   }
 }
+
+#ifndef SAVE_ON_FLASH
+void jswrap_io_shiftOutFastCallback(int val, void *data) {
+  jswrap_io_shiftOutData *d = (jswrap_io_shiftOutData*)data;
+  int n, i;
+  for (i=0;i<d->repeat;i++) {
+    for (n=d->cnt-1; n>=0; n--) {
+      if (val&1)
+        *d->pinAddrs[n].set_addr = d->pinAddrs[n].mask;
+      else
+        *d->pinAddrs[n].clr_addr = d->pinAddrs[n].mask;
+      val>>=1;
+    }
+    *d->clkAddr.set_addr = d->clkAddr.mask; // we adjust these based on clkPol
+    *d->clkAddr.clr_addr = d->clkAddr.mask;
+  }
+}
+#endif
 
 /*JSON{
   "type" : "function",
   "name" : "shiftOut",
   "generate" : "jswrap_io_shiftOut",
   "params" : [
-    ["pins","JsVar","A pin, or an array of pins to use"],
+    ["pins","JsVar","A pin, or an array of pins to use. An array may contain 'undefined' for a pin to ignore that bit"],
     ["options","JsVar","Options, for instance the clock (see below)"],
     ["data","JsVar","The data to shift out (see `E.toUint8Array` for info on the forms this can take)"]
   ],
@@ -648,6 +658,16 @@ void jswrap_io_shiftOut(JsVar *pins, JsVar *options, JsVar *data) {
     d.pins[d.cnt++] = jshGetPinFromVar(pins);
   }
 
+#ifndef SAVE_ON_FLASH
+  bool fastMode = true;
+  uint32_t dummy; // if undefined, set to write to this var
+  JshGetPinAddressResult dummyPin = {
+    .in_addr = &dummy,
+    .set_addr = &dummy,
+    .clr_addr = &dummy,
+    .mask = 0
+  };
+#endif
   // Set pins as outputs
   int i;
   for (i=0;i<d.cnt;i++) {
@@ -656,12 +676,19 @@ void jswrap_io_shiftOut(JsVar *pins, JsVar *options, JsVar *data) {
         jshPinSetState(d.pins[i], JSHPINSTATE_GPIO_OUT);
     }
     // on STM32, try and get the pin's output address
-#ifdef STM32
-    d.addrs[i] = jshGetPinAddress(d.pins[i], JSGPAF_OUTPUT);
+#ifndef SAVE_ON_FLASH
+    if (jshIsPinValid(d.pins[i]))
+      fastMode &= jshGetPinAddress(d.pins[i], &d.pinAddrs[i]);
+    else d.pinAddrs[i] = dummyPin; // otherwise allow fast mode by doing dummy write
 #endif
   }
-#ifdef STM32
-  d.clkAddr = jshGetPinAddress(d.clk, JSGPAF_OUTPUT);
+#ifndef SAVE_ON_FLASH
+  fastMode &= jshGetPinAddress(d.clk, &d.clkAddr);
+  if (fastMode && !d.clkPol) { // if clock polarity is swapped, swap set+clr
+    uint32_t *t = d.clkAddr.set_addr;
+    d.clkAddr.set_addr = d.clkAddr.clr_addr;
+    d.clkAddr.clr_addr = t;
+  }
 #endif
   if (jshIsPinValid(d.clk))
     jshPinSetState(d.clk, JSHPINSTATE_GPIO_OUT);
@@ -669,6 +696,10 @@ void jswrap_io_shiftOut(JsVar *pins, JsVar *options, JsVar *data) {
   // Now run through the data, pushing it out
 #ifdef ESP32
   vTaskSuspendAll();
+#endif
+#ifndef SAVE_ON_FLASH
+  if (fastMode) jsvIterateCallback(data, jswrap_io_shiftOutFastCallback, &d);
+  else
 #endif
   jsvIterateCallback(data, jswrap_io_shiftOutCallback, &d);
 #ifdef ESP32
@@ -774,7 +805,9 @@ JsVar *jswrap_interface_setWatch(
   Pin dataPin = PIN_UNDEFINED;
   if (IS_PIN_A_BUTTON(pin)) {
     edge = 1;
+#ifndef BANGLEJS3 // Bangle.js 3 comes via a controller chip that basically already does debouncing
     debounce = 25;
+#endif
   }
   if (jsvIsObject(repeatOrObject)) {
     JsVar *v;
@@ -816,14 +849,14 @@ JsVar *jswrap_interface_setWatch(
   } else {
     JsVar *watchPtr = jsvNewObject();
     if (watchPtr) {
-      jsvObjectSetChildAndUnLock(watchPtr, "pin", jsvNewFromPin(pin));
-      if (repeat) jsvObjectSetChildAndUnLock(watchPtr, "recur", jsvNewFromBool(repeat));
-      if (debounce>0) jsvObjectSetChildAndUnLock(watchPtr, "debounce", jsvNewFromInteger((JsVarInt)jshGetTimeFromMilliseconds(debounce)));
-      if (edge) jsvObjectSetChildAndUnLock(watchPtr, "edge", jsvNewFromInteger(edge));
+      jsvObjectSetPinChild(watchPtr, "pin", pin);
+      if (repeat) jsvObjectSetBoolChild(watchPtr, "recur", repeat);
+      if (debounce>0) jsvObjectSetIntChild(watchPtr, "debounce", (JsVarInt)jshGetTimeFromMilliseconds(debounce));
+      if (edge) jsvObjectSetIntChild(watchPtr, "edge", edge);
       jsvObjectSetChild(watchPtr, "cb", func); // no unlock intentionally
-      jsvObjectSetChildAndUnLock(watchPtr, "state", jsvNewFromBool(jshPinInput(pin)));
+      jsvObjectSetBoolChild(watchPtr, "state", jshPinInput(pin));
       if (isHighSpeed)
-        jsvObjectSetChildAndUnLock(watchPtr, "hispeed", jsvNewFromBool(true));
+        jsvObjectSetBoolChild(watchPtr, "hispeed", true);
     }
 
     // If nothing already watching the pin, set up a watch
@@ -850,9 +883,8 @@ JsVar *jswrap_interface_setWatch(
     }
 
 
-    JsVar *watchArrayPtr = jsvLock(watchArray);
-    itemIndex = jsvArrayAddToEnd(watchArrayPtr, watchPtr, 1) - 1;
-    jsvUnLock2(watchArrayPtr, watchPtr);
+    itemIndex = jsvArrayAddToEnd(watchArray, watchPtr, 1) - 1;
+    jsvUnLock(watchPtr);
 
 
   }
@@ -877,9 +909,8 @@ To avoid accidentally deleting all Watches, if a parameter is supplied but is `u
  */
 void jswrap_interface_clearWatch(JsVar *idVarArr) {
   if (jsvIsUndefined(idVarArr) || jsvGetArrayLength(idVarArr)==0) {
-    JsVar *watchArrayPtr = jsvLock(watchArray);
     JsvObjectIterator it;
-    jsvObjectIteratorNew(&it, watchArrayPtr);
+    jsvObjectIteratorNew(&it, watchArray);
     while (jsvObjectIteratorHasValue(&it)) {
       JsVar *watchPtr = jsvObjectIteratorGetValue(&it);
       JsVar *watchPin = jsvObjectGetChildIfExists(watchPtr, "pin");
@@ -891,25 +922,20 @@ void jswrap_interface_clearWatch(JsVar *idVarArr) {
     }
     jsvObjectIteratorFree(&it);
     // remove all items
-    jsvRemoveAllChildren(watchArrayPtr);
-    jsvUnLock(watchArrayPtr);
+    jsvRemoveAllChildren(watchArray);
   } else {
     JsVar *idVar = jsvGetArrayItem(idVarArr, 0);
     if (jsvIsUndefined(idVar)) {
       jsExceptionHere(JSET_ERROR, "clearWatch(undefined) not allowed. Use clearWatch() instead");
       return;
     }
-    JsVar *watchArrayPtr = jsvLock(watchArray);
-    JsVar *watchNamePtr = jsvFindChildFromVar(watchArrayPtr, idVar, false);
-    jsvUnLock(watchArrayPtr);
+    JsVar *watchNamePtr = jsvFindChildFromVar(watchArray, idVar, false);
     if (watchNamePtr) { // child is a 'name'
       JsVar *watchPtr = jsvSkipName(watchNamePtr);
       Pin pin = jshGetPinFromVarAndUnLock(jsvObjectGetChildIfExists(watchPtr, "pin"));
       jsvUnLock(watchPtr);
 
-      JsVar *watchArrayPtr = jsvLock(watchArray);
-      jsvRemoveChildAndUnLock(watchArrayPtr, watchNamePtr);
-      jsvUnLock(watchArrayPtr);
+      jsvRemoveChildAndUnLock(watchArray, watchNamePtr);
 
       // Now check if this pin is still being watched
       if (!jsiIsWatchingPin(pin))
@@ -925,8 +951,8 @@ void jswrap_interface_clearWatch(JsVar *idVarArr) {
 int jswrap_interface_setWatch_int(void(*callback)(), Pin pin, bool repeat, int edge) {
   JsVar *fn = jsvNewNativeFunction(callback, JSWAT_VOID);
   JsVar *options = jsvNewObject();
-  jsvObjectSetChildAndUnLock(options, "repeat", jsvNewFromBool(repeat));
-  jsvObjectSetChildAndUnLock(options, "edge", jsvNewFromInteger(edge));
+  jsvObjectSetBoolChild(options, "repeat", repeat);
+  jsvObjectSetIntChild(options, "edge", edge);
   int id = jsvGetIntegerAndUnLock(jswrap_interface_setWatch(fn, pin, options));
   jsvUnLock2(fn, options);
   return id;
